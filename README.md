@@ -274,7 +274,7 @@ Enquanto a indexacao esta rodando, o status fica `indexing`. A Admin UI mostra o
 
 A plataforma nao permite iniciar outra reindexacao para um repositorio que ja tenha job ativo. Jobs em execucao podem ser cancelados na tela do workspace; ao cancelar, o job fica `canceled` e o repositorio fica `index_canceled`.
 
-As tools `code.search_code`, `code.semantic_search_code`, `code.search_symbol`, `code.get_class`, `code.get_method`, `code.find_references`, `code.find_callers`, `code.find_callees` e `code.find_dependencies` ja consultam os dados indexados por workspace. As tools de relacao retornam tambem o alvo resolvido quando houver simbolo, arquivo ou repositorio correspondente.
+As tools MCP `code_search_code`, `code_semantic_search_code`, `code_search_symbol`, `code_get_class`, `code_get_method`, `code_find_references`, `code_find_callers`, `code_find_callees` e `code_find_dependencies` ja consultam os dados indexados por workspace. As tools de relacao retornam tambem o alvo resolvido quando houver simbolo, arquivo ou repositorio correspondente.
 
 ## Roadmap
 

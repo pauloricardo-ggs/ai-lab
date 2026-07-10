@@ -21,17 +21,9 @@ const pool = new Pool({
 });
 
 const tools = [
-  "code.search_symbol",
-  "code.get_class",
-  "code.get_method",
-  "code.find_references",
-  "code.find_callers",
-  "code.find_callees",
-  "code.find_dependencies",
-  "code.explain_architecture",
-  "code.find_related_documents",
-  "code.search_code",
-  "code.semantic_search_code"
+  "code_search_symbol", "code_get_class", "code_get_method", "code_find_references", "code_find_callers",
+  "code_find_callees", "code_find_dependencies", "code_explain_architecture", "code_find_related_documents",
+  "code_search_code", "code_semantic_search_code"
 ];
 
 function sendJson(res, status, body) {
@@ -88,27 +80,27 @@ async function resolveWorkspace(payload) {
 async function executeTool(tool, payload) {
   const workspace = await resolveWorkspace(payload);
 
-  if (tool === "code.search_code" || tool === "code.semantic_search_code") {
+  if (tool === "code_search_code" || tool === "code_semantic_search_code") {
     return searchCode(tool, workspace, payload);
   }
 
-  if (tool === "code.search_symbol" || tool === "code.get_class" || tool === "code.get_method") {
+  if (tool === "code_search_symbol" || tool === "code_get_class" || tool === "code_get_method") {
     return searchSymbols(tool, workspace, payload);
   }
 
-  if (tool === "code.find_references") {
+  if (tool === "code_find_references") {
     return searchRelationships(tool, workspace, payload, ["REFERENCES", "IMPORTS", "DEPENDS_ON", "CALLS"]);
   }
 
-  if (tool === "code.find_callers") {
+  if (tool === "code_find_callers") {
     return searchRelationships(tool, workspace, payload, ["CALLS"], { targetOnly: true });
   }
 
-  if (tool === "code.find_callees") {
+  if (tool === "code_find_callees") {
     return searchRelationships(tool, workspace, payload, ["CALLS"], { sourceOnly: true });
   }
 
-  if (tool === "code.find_dependencies") {
+  if (tool === "code_find_dependencies") {
     return searchRelationships(tool, workspace, payload, ["IMPORTS", "DEPENDS_ON"]);
   }
 
@@ -120,7 +112,7 @@ async function executeTool(tool, payload) {
     result: null,
     matches: [],
     relationships: [],
-    note: "Consulta real ainda limitada a chunks e simbolos indexados. Use code.search_code, code.semantic_search_code ou code.search_symbol."
+    note: "Consulta real ainda limitada a chunks e simbolos indexados. Use code_search_code, code_semantic_search_code ou code_search_symbol."
   };
 }
 
@@ -230,9 +222,9 @@ async function searchSymbols(tool, workspace, payload) {
     throw error;
   }
 
-  const typeFilter = tool === "code.get_class"
+  const typeFilter = tool === "code_get_class"
     ? ["class", "interface", "record", "struct"]
-    : tool === "code.get_method"
+    : tool === "code_get_method"
       ? ["method", "function"]
       : null;
 

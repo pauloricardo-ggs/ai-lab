@@ -12,36 +12,18 @@ const serviceRoutes = {
 };
 
 const toolRoutes = {
-  "knowledge.search_documents": "knowledge", "knowledge.list_documents": "knowledge", "knowledge.get_document": "knowledge",
-  "knowledge.search_business_rules": "knowledge", "knowledge.search_embeddings": "knowledge",
-  "code.search_symbol": "code", "code.get_class": "code", "code.get_method": "code", "code.find_references": "code",
-  "code.find_callers": "code", "code.find_callees": "code", "code.find_dependencies": "code", "code.explain_architecture": "code",
-  "code.find_related_documents": "code", "code.search_code": "code", "code.semantic_search_code": "code",
-  "git.get_history": "git", "git.get_diff": "git", "git.get_commit": "git", "git.get_branch": "git",
-  "git.get_pull_request": "git", "git.list_changed_files": "git", "git.find_commits_touching_symbol": "git", "git.search_commit_message": "git"
+  code_search_symbol: "code", code_get_class: "code", code_get_method: "code", code_find_references: "code",
+  code_find_callers: "code", code_find_callees: "code", code_find_dependencies: "code",
+  code_search_code: "code", code_semantic_search_code: "code"
 };
 
 const toolDescriptions = {
-  "code.semantic_search_code": "Busca semanticamente trechos de código indexado no workspace.",
-  "code.search_code": "Busca trechos de código por relevância no workspace.",
-  "code.search_symbol": "Localiza símbolos de código por nome.",
-  "code.get_class": "Localiza classes, interfaces, records e structs.",
-  "code.get_method": "Localiza métodos e funções.",
-  "code.find_references": "Encontra referências, imports, dependências e chamadas de um símbolo.",
-  "code.find_callers": "Encontra chamadores de um símbolo.",
-  "code.find_callees": "Encontra chamadas originadas por um símbolo.",
-  "code.find_dependencies": "Encontra imports e dependências do código.",
-  "code.explain_architecture": "Retorna dados para explicar a arquitetura indexada.",
-  "code.find_related_documents": "Encontra documentos relacionados ao código.",
-  "knowledge.search_documents": "Busca documentos no workspace.",
-  "knowledge.list_documents": "Lista documentos do workspace.",
-  "knowledge.get_document": "Obtém um documento do workspace.",
-  "knowledge.search_business_rules": "Busca regras de negócio indexadas.",
-  "knowledge.search_embeddings": "Busca semântica em documentos.",
-  "git.get_history": "Consulta histórico Git.", "git.get_diff": "Consulta diff Git.", "git.get_commit": "Consulta commit Git.",
-  "git.get_branch": "Consulta branch Git.", "git.get_pull_request": "Consulta pull request Git.",
-  "git.list_changed_files": "Lista arquivos alterados.", "git.find_commits_touching_symbol": "Encontra commits que tocaram um símbolo.",
-  "git.search_commit_message": "Busca mensagens de commit."
+  code_semantic_search_code: "Busca semanticamente trechos de código indexado no workspace.",
+  code_search_code: "Busca trechos de código por relevância no workspace.", code_search_symbol: "Localiza símbolos de código por nome.",
+  code_get_class: "Localiza classes, interfaces, records e structs.", code_get_method: "Localiza métodos e funções.",
+  code_find_references: "Encontra referências, imports, dependências e chamadas de um símbolo.", code_find_callers: "Encontra chamadores de um símbolo.",
+  code_find_callees: "Encontra chamadas originadas por um símbolo.", code_find_dependencies: "Encontra imports e dependências do código.",
+  code_explain_architecture: "Retorna dados para explicar a arquitetura indexada.", code_find_related_documents: "Encontra documentos relacionados ao código."
 };
 
 function toolDefinition(name) {
@@ -59,7 +41,6 @@ function toolDefinition(name) {
         name: { type: "string", description: "Nome do recurso consultado." },
         limit: { type: "integer", minimum: 1, maximum: 100, description: "Máximo de resultados." }
       },
-      anyOf: [{ required: ["workspace_slug"] }, { required: ["workspace_id"] }],
       additionalProperties: true
     }
   };
@@ -139,8 +120,11 @@ async function handleRpc(message) {
   if (!args.workspace_id && !args.workspace_slug) return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "Informe workspace_slug ou workspace_id." }], isError: true } };
 
   try {
+    const startedAt = Date.now();
+    console.log(JSON.stringify({ event: "mcp_tool_call", tool: name, workspace_slug: args.workspace_slug || null, workspace_id: args.workspace_id || null }));
     const upstream = await proxyTool(serviceName, name, args);
     const isError = upstream.statusCode >= 400;
+    console.log(JSON.stringify({ event: "mcp_tool_result", tool: name, status: upstream.statusCode, latency_ms: Date.now() - startedAt }));
     return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(upstream.body, null, 2) }], isError } };
   } catch (error) {
     return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: error instanceof Error ? error.message : "gateway_error" }], isError: true } };
@@ -148,7 +132,8 @@ async function handleRpc(message) {
 }
 
 async function handleRequest(req, res) {
-  if (req.url !== "/mcp") { sendJson(res, 404, { error: "mcp_endpoint_not_found" }); return; }
+  const pathname = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`).pathname;
+  if (!["/mcp", "/mcp/"].includes(pathname)) { sendJson(res, 404, { error: "mcp_endpoint_not_found" }); return; }
   if (!originAllowed(req)) { sendJson(res, 403, rpcError(null, -32000, "Origin not allowed")); return; }
   if (!isAuthorized(req)) { sendJson(res, 401, rpcError(null, -32001, "Unauthorized"), { "www-authenticate": "Bearer" }); return; }
   if (req.method === "GET") {
@@ -161,7 +146,7 @@ async function handleRequest(req, res) {
   try {
     const message = await readBody(req);
     const response = await handleRpc(message);
-    if (message.method.startsWith("notifications/")) { res.writeHead(202); res.end(); return; }
+    if (typeof message?.method === "string" && message.method.startsWith("notifications/")) { res.writeHead(202); res.end(); return; }
     sendJson(res, 200, response, { "mcp-protocol-version": protocolVersion });
   } catch (error) {
     sendJson(res, 400, rpcError(null, -32700, error instanceof Error ? error.message : "Parse error"));

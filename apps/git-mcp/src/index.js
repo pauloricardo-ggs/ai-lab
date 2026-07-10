@@ -4,14 +4,8 @@ const port = Number(process.env.PORT || 7103);
 const serviceName = process.env.SERVICE_NAME || "git-mcp";
 const reposRoot = process.env.REPOS_ROOT || "/repos";
 const tools = [
-  "git.get_commit",
-  "git.get_history",
-  "git.get_pull_request",
-  "git.get_diff",
-  "git.get_branch",
-  "git.list_changed_files",
-  "git.find_commits_touching_symbol",
-  "git.search_commit_message"
+  "git_get_commit", "git_get_history", "git_get_pull_request", "git_get_diff", "git_get_branch",
+  "git_list_changed_files", "git_find_commits_touching_symbol", "git_search_commit_message"
 ];
 
 function sendJson(res, status, body) {

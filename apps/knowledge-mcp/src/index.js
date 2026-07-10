@@ -3,11 +3,8 @@ import http from "node:http";
 const port = Number(process.env.PORT || 7101);
 const serviceName = process.env.SERVICE_NAME || "knowledge-mcp";
 const tools = [
-  "knowledge.search_documents",
-  "knowledge.get_document",
-  "knowledge.list_documents",
-  "knowledge.search_business_rules",
-  "knowledge.search_embeddings"
+  "knowledge_search_documents", "knowledge_get_document", "knowledge_list_documents",
+  "knowledge_search_business_rules", "knowledge_search_embeddings"
 ];
 
 function sendJson(res, status, body) {
@@ -46,9 +43,9 @@ function executeTool(tool, payload) {
   const workspace = payload.workspace_id || payload.workspace_slug;
 
   switch (tool) {
-    case "knowledge.search_documents":
-    case "knowledge.search_business_rules":
-    case "knowledge.search_embeddings":
+    case "knowledge_search_documents":
+    case "knowledge_search_business_rules":
+    case "knowledge_search_embeddings":
       return {
         status: "ok",
         tool,
@@ -58,7 +55,7 @@ function executeTool(tool, payload) {
         sources: [],
         note: "Implementacao pendente: conecte PostgreSQL/Qdrant para retornar trechos relevantes."
       };
-    case "knowledge.get_document":
+    case "knowledge_get_document":
       return {
         status: "ok",
         tool,
@@ -66,7 +63,7 @@ function executeTool(tool, payload) {
         document: null,
         note: "Implementacao pendente: implemente leitura da tabela documents/document_chunks."
       };
-    case "knowledge.list_documents":
+    case "knowledge_list_documents":
       return {
         status: "ok",
         tool,
