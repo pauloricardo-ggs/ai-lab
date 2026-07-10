@@ -8,6 +8,7 @@
 - Qdrant: vetores de documentos e simbolos de codigo.
 - Neo4j: grafo tecnico de dependencias e relacoes entre simbolos.
 - Admin UI: portal operacional para dashboard, workspaces, repositorios e console MCP.
+- Roslyn Indexer: parser C# para extracao de simbolos e relacoes tecnicas.
 - MCP Gateway: autenticacao, roteamento, rate limit, auditoria e padronizacao de erros.
 - Knowledge MCP: consultas documentais e semanticas.
 - Code MCP: consultas de simbolos, referencias, dependencias e arquitetura.

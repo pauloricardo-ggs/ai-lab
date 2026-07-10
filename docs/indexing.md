@@ -11,7 +11,7 @@
 ## Codigo
 
 1. `repository-sync` clona ou atualiza repositorios.
-2. `roslyn-indexer` indexa C# e VB.NET.
+2. `roslyn-indexer` indexa C#.
 3. `tree-sitter-indexer` suporta linguagens futuras.
 4. `graph-builder` consolida relacoes no Neo4j.
 5. `embedding-worker` grava vetores em `code_symbols`.
@@ -20,15 +20,28 @@
 
 Na versao atual, a Admin UI dispara uma indexacao real em background logo apos o clone. O repositorio e a unidade de ingestao, mas o escopo do indice e do grafo e o workspace:
 
-1. escaneia arquivos suportados no repositorio, incluindo Swift/Xcode
+1. escaneia arquivos suportados no repositorio
 2. cria chunks por linhas
-3. extrai simbolos simples por linguagem
+3. extrai simbolos por linguagem
 4. gera embeddings locais via Ollama
 5. grava chunks em `code_chunks`
 6. grava simbolos em `code_symbols`
-7. envia vetores para Qdrant
-8. cria grafo basico no Neo4j com `Workspace`, `Repository`, `CodeFile` e `CodeSymbol`
-9. cria relacoes cross-repo simples entre simbolos de mesmo nome dentro do workspace
+7. grava relacoes em `code_relationships`
+8. envia vetores para Qdrant
+9. cria grafo no Neo4j com `Workspace`, `Repository`, `CodeFile`, `CodeSymbol` e `CodeReference`
+10. cria relacoes cross-repo simples entre simbolos de mesmo nome dentro do workspace
+
+Indexadores especificos:
+
+- C#: Roslyn Indexer (`roslyn-indexer`) para namespaces, tipos, metodos, propriedades, using, heranca/referencias e chamadas. Se o servico estiver indisponivel, o Admin usa fallback local.
+- TypeScript/JavaScript: imports, exports, require, classes, interfaces, types, enums, funcoes/metodos e chamadas.
+- HTML/CSS: ids/classes/seletores e referencias a assets/links/imports.
+- Swift: imports, tipos, protocolos, funcoes, conformances e chamadas.
+- Dart: imports/exports/parts, tipos, mixins, extensions, funcoes, referencias e chamadas.
+- JSON/YAML: chaves estruturais e dependencias conhecidas, como `package.json` e `pubspec.yaml`.
+- SQL: tabelas, views, procedures/functions/triggers e referencias via `FROM`, `JOIN`, `REFERENCES`, `UPDATE`, `INSERT`.
+
+Outras linguagens textuais entram pelo indexador generico, que extrai chaves e headings quando possivel.
 
 O status do repositorio muda para `indexed` quando a indexacao termina. Se falhar, o status fica `index_error` e o repositorio pode ser reindexado pela Admin UI.
 

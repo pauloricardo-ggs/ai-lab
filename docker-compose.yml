@@ -106,6 +106,7 @@ services:
       POSTGRES_HOST: postgres
       POSTGRES_INTERNAL_PORT: 5432
       REPOS_ROOT: /repos
+      ROSLYN_INDEXER_URL: http://roslyn-indexer:7201
     volumes:
       - ./data/repos:/repos
       - /var/run/docker.sock:/var/run/docker.sock:ro
@@ -122,8 +123,23 @@ services:
         condition: service_started
       neo4j:
         condition: service_started
+      roslyn-indexer:
+        condition: service_started
       gateway:
         condition: service_started
+    networks:
+      - ai-platform
+
+  roslyn-indexer:
+    build:
+      context: ./workers/roslyn-indexer
+      args:
+        DOTNET_SDK_IMAGE: ${DOTNET_SDK_IMAGE:-mcr.microsoft.com/dotnet/sdk:8.0}
+        DOTNET_ASPNET_IMAGE: ${DOTNET_ASPNET_IMAGE:-mcr.microsoft.com/dotnet/aspnet:8.0}
+    container_name: ai-roslyn-indexer
+    restart: unless-stopped
+    environment:
+      ASPNETCORE_URLS: http://0.0.0.0:7201
     networks:
       - ai-platform
 

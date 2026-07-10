@@ -133,6 +133,8 @@ QDRANT_IMAGE=qdrant/qdrant:vX.Y.Z
 OPEN_WEBUI_IMAGE=ghcr.io/open-webui/open-webui:vX.Y.Z
 POSTGRES_IMAGE=postgres:X.Y-alpine
 NEO4J_IMAGE=neo4j:X.Y.Z
+DOTNET_SDK_IMAGE=mcr.microsoft.com/dotnet/sdk:X.Y
+DOTNET_ASPNET_IMAGE=mcr.microsoft.com/dotnet/aspnet:X.Y
 ```
 
 Depois execute:
@@ -242,11 +244,25 @@ Ao adicionar um repositorio pela Admin UI, a plataforma inicia a indexacao em ba
 4. gera embeddings locais com Ollama usando `EMBEDDING_MODEL`
 5. grava chunks em `code_chunks`
 6. grava simbolos simples em `code_symbols`
-7. salva vetores no Qdrant na collection `code_symbols`
-8. cria nos e relacionamentos no Neo4j sob o no `Workspace`
-9. marca o repositorio como `indexed` ao concluir
+7. grava relacoes tecnicas em `code_relationships`
+8. salva vetores no Qdrant na collection `code_symbols`
+9. cria nos e relacionamentos no Neo4j sob o no `Workspace`
+10. marca o repositorio como `indexed` ao concluir
 
 O repositorio e a unidade de ingestao, mas o escopo do indice e do grafo e sempre o workspace. Isso permite consultar e relacionar repositorios diferentes dentro do mesmo workspace. O grafo usa `Workspace -> Repository -> CodeFile -> CodeSymbol` e cria relacoes `RELATED_SYMBOL` entre simbolos de mesmo nome em repositorios diferentes do workspace.
+
+Linguagens com indexacao especifica:
+
+- C# via Roslyn Indexer, com fallback local se o servico estiver indisponivel
+- TypeScript e JavaScript
+- HTML e CSS
+- Swift
+- Dart
+- JSON
+- YAML
+- SQL
+
+Outros arquivos textuais continuam sendo indexados pelo indexador generico.
 
 Enquanto a indexacao esta rodando, o status fica `indexing`. A Admin UI mostra o job do workspace em tempo real, incluindo fase atual, arquivo em processamento, total de arquivos do repositorio, arquivos indexaveis, arquivos ignorados, chunks processados e erros. Se houver falha, fica `index_error` e o repositorio pode ser reindexado pelo botao `Reindexar` na Admin UI.
 

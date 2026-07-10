@@ -31,7 +31,7 @@ Todas as chamadas de tool exigem:
 - `code.search_code`
 - `code.semantic_search_code`
 
-Na versao atual, `code.search_code`, `code.semantic_search_code`, `code.search_symbol`, `code.get_class`, `code.get_method` e `code.find_references` consultam os dados reais gerados pela indexacao de repositorios.
+Na versao atual, `code.search_code`, `code.semantic_search_code`, `code.search_symbol`, `code.get_class`, `code.get_method`, `code.find_references`, `code.find_callers`, `code.find_callees` e `code.find_dependencies` consultam os dados reais gerados pela indexacao de repositorios.
 
 ## Git MCP
 

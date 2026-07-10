@@ -24,6 +24,7 @@ const embeddingModel = process.env.EMBEDDING_MODEL || "nomic-embed-text";
 const embeddingVectorSize = Number(process.env.EMBEDDING_VECTOR_SIZE || 768);
 const neo4jUrl = process.env.NEO4J_HTTP_URL || "http://neo4j:7474";
 const neo4jPassword = process.env.NEO4J_PASSWORD || "";
+const roslynIndexerUrl = process.env.ROSLYN_INDEXER_URL || "";
 const codeCollection = "code_symbols";
 
 const ignoredDirectories = new Set([
@@ -52,7 +53,10 @@ const languageByExtension = new Map([
   [".cs", "csharp"],
   [".vb", "vbnet"],
   [".swift", "swift"],
+  [".dart", "dart"],
   [".js", "javascript"],
+  [".mjs", "javascript"],
+  [".cjs", "javascript"],
   [".jsx", "javascript"],
   [".ts", "typescript"],
   [".tsx", "typescript"],
@@ -75,7 +79,11 @@ const languageByExtension = new Map([
   [".xcworkspacedata", "xml"],
   [".entitlements", "xml"],
   [".html", "html"],
+  [".htm", "html"],
   [".css", "css"],
+  [".scss", "css"],
+  [".sass", "css"],
+  [".less", "css"],
   [".sql", "sql"],
   [".sh", "shell"]
 ]);
@@ -157,6 +165,15 @@ const serviceDefinitions = [
     healthUrl: "http://neo4j:7474",
     publicPortEnv: "NEO4J_HTTP_PORT",
     path: "/"
+  },
+  {
+    id: "roslyn-indexer",
+    name: "Roslyn Indexer",
+    kind: "api",
+    description: "Parser C# com Roslyn para simbolos, chamadas e referencias.",
+    healthUrl: "http://roslyn-indexer:7201/health",
+    publicPortEnv: null,
+    path: "/health"
   },
   {
     id: "mcp-gateway",
@@ -245,6 +262,10 @@ function assertSafeSegment(value, fieldName) {
 }
 
 function publicUrl(req, service) {
+  if (!service.publicPortEnv && service.id !== "admin") {
+    return null;
+  }
+
   const hostHeader = req.headers.host || "localhost";
   const hostname = hostHeader.split(":")[0];
   const proto = req.headers["x-forwarded-proto"] || "http";
@@ -290,6 +311,7 @@ async function servicesPayload(req) {
     kind: service.kind,
     description: service.description,
     url: publicUrl(req, service),
+    can_open: Boolean(service.publicPortEnv) || service.id === "admin",
     ...(await checkService(service))
   })));
 
@@ -423,6 +445,22 @@ async function ensureApplicationSchema() {
       created_at TIMESTAMP NOT NULL DEFAULT NOW()
     )
   `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS code_relationships (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      repository_id UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+      relationship_type TEXT NOT NULL,
+      source_name TEXT,
+      target_name TEXT NOT NULL,
+      source_file_path TEXT NOT NULL,
+      target_file_path TEXT,
+      language TEXT NOT NULL,
+      start_line INTEGER,
+      metadata JSONB NOT NULL DEFAULT '{}',
+      created_at TIMESTAMP NOT NULL DEFAULT NOW()
+    )
+  `);
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'workspace'");
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS phase TEXT");
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS current_repository TEXT");
@@ -441,6 +479,10 @@ async function ensureApplicationSchema() {
   await query("CREATE INDEX IF NOT EXISTS idx_code_chunks_repository_id ON code_chunks(repository_id)");
   await query("CREATE INDEX IF NOT EXISTS idx_code_chunks_file_path ON code_chunks(file_path)");
   await query("CREATE INDEX IF NOT EXISTS idx_code_symbols_repository_id ON code_symbols(repository_id)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_relationships_workspace_id ON code_relationships(workspace_id)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_relationships_repository_id ON code_relationships(repository_id)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_relationships_target_name ON code_relationships(target_name)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_relationships_type ON code_relationships(relationship_type)");
   await query("CREATE INDEX IF NOT EXISTS idx_code_index_jobs_repository_id ON code_index_jobs(repository_id)");
   await query("CREATE INDEX IF NOT EXISTS idx_code_index_jobs_workspace_id ON code_index_jobs(workspace_id)");
 }
@@ -758,6 +800,7 @@ async function indexRepository(workspace, repository) {
     const files = scan.files;
     const chunks = [];
     const symbols = [];
+    const relationships = [];
 
     await updateIndexJob(jobId, {
       phase: "extracting",
@@ -770,8 +813,10 @@ async function indexRepository(workspace, repository) {
       await updateIndexJob(jobId, { currentFile: file.relativePath });
       const content = await fs.readFile(file.absolutePath, "utf8");
       const fileChunks = chunkContent(content);
+      const analysis = await analyzeCodeFile(content, file, controller.signal);
       chunks.push(...fileChunks.map((chunk) => ({ ...chunk, file })));
-      symbols.push(...extractSymbols(content, file));
+      symbols.push(...analysis.symbols);
+      relationships.push(...analysis.relationships);
       await incrementIndexJob(jobId, { files: 1 });
     }
 
@@ -846,14 +891,37 @@ async function indexRepository(workspace, repository) {
           symbol.filePath,
           symbol.line,
           symbol.line,
-          { indexed_by: "admin-ui" }
+          { indexed_by: "admin-ui", ...(symbol.metadata || {}) }
+        ]
+      );
+    }
+
+    for (const relationship of relationships) {
+      assertIndexNotCanceled(controller.signal);
+      await query(
+        `INSERT INTO code_relationships (
+          workspace_id, repository_id, relationship_type, source_name, target_name,
+          source_file_path, target_file_path, language, start_line, metadata
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [
+          workspace.id,
+          repository.id,
+          relationship.type,
+          relationship.sourceName,
+          relationship.targetName,
+          relationship.sourceFilePath,
+          relationship.targetFilePath || null,
+          relationship.language,
+          relationship.line,
+          relationship.metadata || {}
         ]
       );
     }
 
     await updateIndexJob(jobId, { phase: "graph", symbols: symbols.length });
     assertIndexNotCanceled(controller.signal);
-    await upsertNeo4jRepository(workspace, repository, files, symbols);
+    await upsertNeo4jRepository(workspace, repository, files, symbols, relationships);
     assertIndexNotCanceled(controller.signal);
     await query(
       `UPDATE code_index_jobs
@@ -862,7 +930,7 @@ async function indexRepository(workspace, repository) {
       [jobId, files.length, indexedChunks, symbols.length]
     );
 
-    return { files: files.length, chunks: indexedChunks, symbols: symbols.length };
+    return { files: files.length, chunks: indexedChunks, symbols: symbols.length, relationships: relationships.length };
   } catch (error) {
     if (error instanceof IndexCanceledError || error.name === "AbortError") {
       await cleanupRepositoryIndex(repository.id).catch((cleanupError) => console.error("repository canceled index cleanup failed", cleanupError));
@@ -970,6 +1038,7 @@ async function incrementIndexJob(jobId, increments) {
 async function cleanupRepositoryIndex(repositoryId) {
   await deleteQdrantRepositoryPoints(repositoryId);
   await deleteNeo4jRepository(repositoryId);
+  await query("DELETE FROM code_relationships WHERE repository_id = $1", [repositoryId]);
   await query("DELETE FROM code_symbols WHERE repository_id = $1", [repositoryId]);
   await query("DELETE FROM code_chunks WHERE repository_id = $1", [repositoryId]);
 }
@@ -1105,78 +1174,470 @@ function chunkContent(content) {
   return chunks;
 }
 
-function extractSymbols(content, file) {
-  const patterns = symbolPatterns(file.language);
+async function analyzeCodeFile(content, file, signal) {
+  if (file.language === "csharp" && roslynIndexerUrl) {
+    try {
+      return normalizeAnalysis(await analyzeCsharpWithRoslyn(content, file, signal));
+    } catch (error) {
+      console.warn("roslyn indexer unavailable, falling back to local csharp analyzer", error);
+    }
+  }
+
+  const analyzer = languageAnalyzers[file.language] || analyzeGenericTree;
+  return normalizeAnalysis(analyzer(content, file));
+}
+
+function normalizeAnalysis(analysis) {
+  return {
+    symbols: dedupeSymbols(analysis.symbols || []),
+    relationships: dedupeRelationships(analysis.relationships || [])
+  };
+}
+
+async function analyzeCsharpWithRoslyn(content, file, signal) {
+  const response = await fetch(`${roslynIndexerUrl.replace(/\/$/, "")}/analyze`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      file_path: file.relativePath,
+      language: file.language,
+      content
+    }),
+    signal: abortSignalWithTimeout(signal, 20_000)
+  });
+
+  if (!response.ok) {
+    throw new Error(`roslyn_indexer_failed_${response.status}`);
+  }
+
+  const body = await response.json();
+  return {
+    symbols: (body.symbols || []).map((symbol) => createSymbol(file, symbol.type, symbol.name, symbol.line || 1, {
+      indexer: "roslyn",
+      full_name: symbol.full_name,
+      ...(symbol.metadata || {})
+    })),
+    relationships: (body.relationships || []).map((relationship) => createRelationship(file, relationship.type, relationship.target_name, relationship.line || 1, {
+      indexer: "roslyn",
+      roslyn_kind: relationship.kind,
+      ...(relationship.metadata || {})
+    }))
+  };
+}
+
+function analyzePatternLanguage(content, file, symbolPatterns, relationshipExtractors = []) {
   const lines = content.split(/\r?\n/);
   const symbols = [];
+  const relationships = [];
 
   lines.forEach((line, index) => {
-    for (const pattern of patterns) {
+    for (const pattern of symbolPatterns) {
       const match = line.match(pattern.regex);
       if (match?.[pattern.group]) {
         const name = match[pattern.group];
-        symbols.push({
-          type: pattern.type,
-          name,
-          fullName: `${file.relativePath}#${name}`,
-          language: file.language,
-          filePath: file.relativePath,
-          line: index + 1
-        });
+        if (ignoredSymbolNames.has(name)) {
+          continue;
+        }
+        symbols.push(createSymbol(file, pattern.type, name, index + 1, pattern.metadata || {}));
       }
     }
   });
 
-  return symbols;
+  for (const extractor of relationshipExtractors) {
+    relationships.push(...extractor(content, file, symbols));
+  }
+
+  return { symbols, relationships };
 }
 
-function symbolPatterns(language) {
+function createSymbol(file, type, name, line, metadata = {}) {
+  return {
+    type,
+    name,
+    fullName: `${file.relativePath}#${name}`,
+    language: file.language,
+    filePath: file.relativePath,
+    line,
+    metadata: {
+      indexer: indexerKindForLanguage(file.language),
+      ...metadata
+    }
+  };
+}
+
+function createRelationship(file, type, targetName, line, metadata = {}, symbols = []) {
+  return {
+    type,
+    sourceName: relationshipSourceFor(symbols, line),
+    targetName,
+    sourceFilePath: file.relativePath,
+    targetFilePath: metadata.targetFilePath || null,
+    language: file.language,
+    line,
+    metadata: {
+      indexer: indexerKindForLanguage(file.language),
+      ...metadata
+    }
+  };
+}
+
+function relationshipSourceFor(symbols, line) {
+  let current = null;
+  for (const symbol of symbols) {
+    if (symbol.line <= line && (!current || symbol.line > current.line)) {
+      current = symbol;
+    }
+  }
+  return current?.name || null;
+}
+
+function dedupeSymbols(symbols) {
+  const seen = new Set();
+  return symbols.filter((symbol) => {
+    const key = `${symbol.type}:${symbol.name}:${symbol.filePath}:${symbol.line}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function dedupeRelationships(relationships) {
+  const seen = new Set();
+  return relationships.filter((relationship) => {
+    const key = `${relationship.type}:${relationship.sourceName || ""}:${relationship.targetName}:${relationship.sourceFilePath}:${relationship.line}`;
+    if (seen.has(key)) {
+      return false;
+    }
+    seen.add(key);
+    return true;
+  });
+}
+
+function indexerKindForLanguage(language) {
+  if (language === "csharp") {
+    return "roslyn-fallback";
+  }
+  if (["javascript", "typescript", "html", "css", "swift", "dart", "json", "yaml", "sql"].includes(language)) {
+    return `${language}-language-indexer`;
+  }
+  return "generic-tree-indexer";
+}
+
+const languageAnalyzers = {
+  csharp: analyzeCsharp,
+  javascript: analyzeJavaScriptLike,
+  typescript: analyzeJavaScriptLike,
+  html: analyzeHtml,
+  css: analyzeCss,
+  swift: analyzeSwift,
+  dart: analyzeDart,
+  json: analyzeJson,
+  yaml: analyzeYaml,
+  sql: analyzeSql
+};
+
+const ignoredSymbolNames = new Set([
+  "if",
+  "for",
+  "while",
+  "switch",
+  "catch",
+  "return",
+  "throw",
+  "else",
+  "do",
+  "try",
+  "finally",
+  "guard"
+]);
+
+function analyzeCsharp(content, file) {
+  return analyzePatternLanguage(content, file, csharpSymbolPatterns(), [
+    extractCsharpRelationships,
+    extractCallRelationships
+  ]);
+}
+
+function analyzeJavaScriptLike(content, file) {
   const commonJs = [
     { type: "class", group: 1, regex: /^\s*(?:export\s+)?class\s+([A-Za-z_$][\w$]*)/ },
+    { type: "interface", group: 1, regex: /^\s*(?:export\s+)?interface\s+([A-Za-z_$][\w$]*)/ },
+    { type: "type", group: 1, regex: /^\s*(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*=/ },
+    { type: "enum", group: 1, regex: /^\s*(?:export\s+)?enum\s+([A-Za-z_$][\w$]*)/ },
     { type: "function", group: 1, regex: /^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/ },
-    { type: "function", group: 1, regex: /^\s*(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(/ }
+    { type: "function", group: 1, regex: /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(?/ },
+    { type: "method", group: 1, regex: /^\s*(?:public|private|protected|static|async|get|set|\s)*\s*([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*[{:]/ }
   ];
+  return analyzePatternLanguage(content, file, commonJs, [
+    extractJavaScriptRelationships,
+    extractCallRelationships
+  ]);
+}
 
-  const byLanguage = {
-    csharp: [
-      { type: "class", group: 1, regex: /^\s*(?:public|private|internal|protected)?\s*(?:sealed|abstract|static)?\s*class\s+([A-Za-z_]\w*)/ },
-      { type: "interface", group: 1, regex: /^\s*(?:public|private|internal)?\s*interface\s+([A-Za-z_]\w*)/ },
-      { type: "record", group: 1, regex: /^\s*(?:public|private|internal)?\s*record\s+([A-Za-z_]\w*)/ },
-      { type: "method", group: 1, regex: /^\s*(?:public|private|internal|protected)?\s*(?:static\s+)?(?:async\s+)?[\w<>\[\],?]+\s+([A-Za-z_]\w*)\s*\(/ }
-    ],
-    javascript: commonJs,
-    typescript: commonJs,
-    swift: [
-      { type: "class", group: 1, regex: /^\s*(?:open|public|internal|fileprivate|private)?\s*(?:final\s+)?class\s+([A-Za-z_]\w*)/ },
-      { type: "struct", group: 1, regex: /^\s*(?:public|internal|fileprivate|private)?\s*struct\s+([A-Za-z_]\w*)/ },
-      { type: "enum", group: 1, regex: /^\s*(?:public|internal|fileprivate|private)?\s*enum\s+([A-Za-z_]\w*)/ },
-      { type: "protocol", group: 1, regex: /^\s*(?:public|internal|fileprivate|private)?\s*protocol\s+([A-Za-z_]\w*)/ },
-      { type: "actor", group: 1, regex: /^\s*(?:public|internal|fileprivate|private)?\s*actor\s+([A-Za-z_]\w*)/ },
-      { type: "function", group: 1, regex: /^\s*(?:open|public|internal|fileprivate|private)?\s*(?:static\s+)?func\s+([A-Za-z_]\w*)\s*\(/ }
-    ],
-    python: [
-      { type: "class", group: 1, regex: /^\s*class\s+([A-Za-z_]\w*)/ },
-      { type: "function", group: 1, regex: /^\s*def\s+([A-Za-z_]\w*)\s*\(/ },
-      { type: "function", group: 1, regex: /^\s*async\s+def\s+([A-Za-z_]\w*)\s*\(/ }
-    ],
-    java: [
-      { type: "class", group: 1, regex: /^\s*(?:public|private|protected)?\s*(?:abstract|final)?\s*class\s+([A-Za-z_]\w*)/ },
-      { type: "interface", group: 1, regex: /^\s*(?:public|private|protected)?\s*interface\s+([A-Za-z_]\w*)/ },
-      { type: "method", group: 1, regex: /^\s*(?:public|private|protected)?\s*(?:static\s+)?[\w<>\[\],?]+\s+([A-Za-z_]\w*)\s*\(/ }
-    ],
-    go: [
-      { type: "function", group: 1, regex: /^\s*func\s+(?:\([^)]+\)\s*)?([A-Za-z_]\w*)\s*\(/ },
-      { type: "struct", group: 1, regex: /^\s*type\s+([A-Za-z_]\w*)\s+struct\b/ },
-      { type: "interface", group: 1, regex: /^\s*type\s+([A-Za-z_]\w*)\s+interface\b/ }
-    ],
-    rust: [
-      { type: "function", group: 1, regex: /^\s*(?:pub\s+)?fn\s+([A-Za-z_]\w*)\s*\(/ },
-      { type: "struct", group: 1, regex: /^\s*(?:pub\s+)?struct\s+([A-Za-z_]\w*)/ },
-      { type: "enum", group: 1, regex: /^\s*(?:pub\s+)?enum\s+([A-Za-z_]\w*)/ }
-    ]
-  };
+function analyzeSwift(content, file) {
+  return analyzePatternLanguage(content, file, [
+    { type: "class", group: 1, regex: /^\s*(?:open|public|internal|fileprivate|private)?\s*(?:final\s+)?class\s+([A-Za-z_]\w*)/ },
+    { type: "struct", group: 1, regex: /^\s*(?:public|internal|fileprivate|private)?\s*struct\s+([A-Za-z_]\w*)/ },
+    { type: "enum", group: 1, regex: /^\s*(?:public|internal|fileprivate|private)?\s*enum\s+([A-Za-z_]\w*)/ },
+    { type: "protocol", group: 1, regex: /^\s*(?:public|internal|fileprivate|private)?\s*protocol\s+([A-Za-z_]\w*)/ },
+    { type: "actor", group: 1, regex: /^\s*(?:public|internal|fileprivate|private)?\s*actor\s+([A-Za-z_]\w*)/ },
+    { type: "function", group: 1, regex: /^\s*(?:open|public|internal|fileprivate|private)?\s*(?:static\s+)?func\s+([A-Za-z_]\w*)\s*\(/ }
+  ], [
+    extractSwiftRelationships,
+    extractCallRelationships
+  ]);
+}
 
-  return byLanguage[language] || [];
+function analyzeDart(content, file) {
+  return analyzePatternLanguage(content, file, [
+    { type: "class", group: 1, regex: /^\s*(?:abstract\s+)?class\s+([A-Za-z_]\w*)/ },
+    { type: "mixin", group: 1, regex: /^\s*mixin\s+([A-Za-z_]\w*)/ },
+    { type: "enum", group: 1, regex: /^\s*enum\s+([A-Za-z_]\w*)/ },
+    { type: "extension", group: 1, regex: /^\s*extension\s+([A-Za-z_]\w*)/ },
+    { type: "function", group: 1, regex: /^\s*(?:Future<[^>]+>|[\w<>?]+)\s+([A-Za-z_]\w*)\s*\(/ }
+  ], [
+    extractDartRelationships,
+    extractCallRelationships
+  ]);
+}
+
+function analyzeHtml(content, file) {
+  const lines = content.split(/\r?\n/);
+  const symbols = [];
+  const relationships = [];
+  lines.forEach((line, index) => {
+    for (const match of line.matchAll(/<([a-zA-Z][\w:-]*)([^>]*)>/g)) {
+      const tag = match[1].toLowerCase();
+      const attrs = match[2] || "";
+      const id = attrs.match(/\bid=["']([^"']+)["']/)?.[1];
+      if (id) {
+        symbols.push(createSymbol(file, "html_id", `${tag}#${id}`, index + 1, { tag }));
+      }
+      const classAttr = attrs.match(/\bclass=["']([^"']+)["']/)?.[1];
+      for (const className of (classAttr || "").split(/\s+/).filter(Boolean)) {
+        symbols.push(createSymbol(file, "html_class", `${tag}.${className}`, index + 1, { tag }));
+      }
+      for (const attrMatch of attrs.matchAll(/\b(?:src|href|action)=["']([^"']+)["']/g)) {
+        relationships.push(createRelationship(file, "REFERENCES", attrMatch[1], index + 1, { attribute: attrMatch[0].split("=")[0] }, symbols));
+      }
+    }
+  });
+  return { symbols, relationships };
+}
+
+function analyzeCss(content, file) {
+  const lines = content.split(/\r?\n/);
+  const symbols = [];
+  const relationships = [];
+  lines.forEach((line, index) => {
+    const importMatch = line.match(/@import\s+(?:url\()?["']?([^"')]+)["']?\)?/);
+    if (importMatch) {
+      relationships.push(createRelationship(file, "IMPORTS", importMatch[1], index + 1, { syntax: "@import" }, symbols));
+    }
+    for (const urlMatch of line.matchAll(/url\(["']?([^"')]+)["']?\)/g)) {
+      relationships.push(createRelationship(file, "REFERENCES", urlMatch[1], index + 1, { syntax: "url" }, symbols));
+    }
+    const selectorMatch = line.match(/^\s*([^@{}][^{]+)\{/);
+    if (selectorMatch) {
+      for (const selector of selectorMatch[1].split(",").map((item) => item.trim()).filter(Boolean)) {
+        const normalized = selector.replace(/\s+/g, " ");
+        symbols.push(createSymbol(file, selector.startsWith(".") ? "css_class" : selector.startsWith("#") ? "css_id" : "css_selector", normalized, index + 1));
+      }
+    }
+  });
+  return { symbols, relationships };
+}
+
+function analyzeJson(content, file) {
+  const symbols = [];
+  const relationships = [];
+  try {
+    const parsed = JSON.parse(content);
+    collectJsonSymbols(parsed, file, symbols);
+    if (path.basename(file.relativePath) === "package.json") {
+      for (const section of ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"]) {
+        for (const dependency of Object.keys(parsed[section] || {})) {
+          relationships.push(createRelationship(file, "DEPENDS_ON", dependency, 1, { section }, symbols));
+        }
+      }
+    }
+  } catch {
+    return analyzeGenericTree(content, file);
+  }
+  return { symbols, relationships };
+}
+
+function analyzeYaml(content, file) {
+  const lines = content.split(/\r?\n/);
+  const symbols = [];
+  const relationships = [];
+  const stack = [];
+  lines.forEach((line, index) => {
+    const match = line.match(/^(\s*)([A-Za-z0-9_.-]+):(?:\s*(.*))?$/);
+    if (!match) {
+      return;
+    }
+    const indent = match[1].length;
+    const key = match[2];
+    while (stack.length && stack[stack.length - 1].indent >= indent) {
+      stack.pop();
+    }
+    const pathParts = [...stack.map((item) => item.key), key];
+    const fullName = pathParts.join(".");
+    symbols.push(createSymbol(file, "yaml_key", fullName, index + 1));
+    if (["dependencies", "dev_dependencies"].includes(stack.at(-1)?.key) && indent > stack.at(-1).indent) {
+      relationships.push(createRelationship(file, "DEPENDS_ON", key, index + 1, { section: stack.at(-1).key }, symbols));
+    }
+    stack.push({ indent, key });
+  });
+  return { symbols, relationships };
+}
+
+function analyzeSql(content, file) {
+  const lines = content.split(/\r?\n/);
+  const symbols = [];
+  const relationships = [];
+  const createPattern = /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(TABLE|VIEW|INDEX|FUNCTION|PROCEDURE|TRIGGER)\s+(?:IF\s+NOT\s+EXISTS\s+)?["`[]?([\w.]+)["`\]]?/i;
+  lines.forEach((line, index) => {
+    const createMatch = line.match(createPattern);
+    if (createMatch) {
+      symbols.push(createSymbol(file, createMatch[1].toLowerCase(), createMatch[2], index + 1));
+    }
+    for (const match of line.matchAll(/\b(?:FROM|JOIN|REFERENCES|INTO|UPDATE|TABLE)\s+["`[]?([\w.]+)["`\]]?/gi)) {
+      relationships.push(createRelationship(file, "REFERENCES", match[1], index + 1, { sql_keyword: match[0].split(/\s+/)[0].toUpperCase() }, symbols));
+    }
+  });
+  return { symbols, relationships };
+}
+
+function analyzeGenericTree(content, file) {
+  const lines = content.split(/\r?\n/);
+  const symbols = [];
+  lines.forEach((line, index) => {
+    const heading = line.match(/^\s{0,3}#{1,6}\s+(.+)/);
+    if (heading) {
+      symbols.push(createSymbol(file, "heading", heading[1].trim().slice(0, 160), index + 1));
+    }
+    const key = line.match(/^\s*([A-Za-z0-9_.-]{2,80})\s*[:=]/);
+    if (key) {
+      symbols.push(createSymbol(file, "key", key[1], index + 1));
+    }
+  });
+  return { symbols, relationships: [] };
+}
+
+function csharpSymbolPatterns() {
+  return [
+    { type: "namespace", group: 1, regex: /^\s*namespace\s+([A-Za-z_][\w.]*)/ },
+    { type: "class", group: 1, regex: /^\s*(?:public|private|internal|protected)?\s*(?:sealed|abstract|static|partial)?\s*class\s+([A-Za-z_]\w*)/ },
+    { type: "interface", group: 1, regex: /^\s*(?:public|private|internal)?\s*(?:partial)?\s*interface\s+([A-Za-z_]\w*)/ },
+    { type: "record", group: 1, regex: /^\s*(?:public|private|internal)?\s*(?:partial)?\s*record\s+([A-Za-z_]\w*)/ },
+    { type: "struct", group: 1, regex: /^\s*(?:public|private|internal)?\s*(?:readonly|partial)?\s*struct\s+([A-Za-z_]\w*)/ },
+    { type: "enum", group: 1, regex: /^\s*(?:public|private|internal)?\s*enum\s+([A-Za-z_]\w*)/ },
+    { type: "method", group: 1, regex: /^\s*(?:public|private|internal|protected)?\s*(?:static\s+)?(?:async\s+)?[\w<>\[\],?]+\s+([A-Za-z_]\w*)\s*\(/ }
+  ];
+}
+
+function extractCsharpRelationships(content, file, symbols) {
+  const relationships = [];
+  content.split(/\r?\n/).forEach((line, index) => {
+    const usingMatch = line.match(/^\s*using\s+(?:static\s+)?([A-Za-z_][\w.]*)\s*;/);
+    if (usingMatch) {
+      relationships.push(createRelationship(file, "IMPORTS", usingMatch[1], index + 1, { syntax: "using" }, symbols));
+    }
+    const inheritsMatch = line.match(/\b(?:class|interface|record|struct)\s+([A-Za-z_]\w*)\s*:\s*([^{]+)/);
+    if (inheritsMatch) {
+      for (const target of inheritsMatch[2].split(",").map((item) => item.trim().split(/\s+/).pop()).filter(Boolean)) {
+        relationships.push(createRelationship(file, "REFERENCES", target, index + 1, { syntax: "inheritance", source: inheritsMatch[1] }, symbols));
+      }
+    }
+  });
+  return relationships;
+}
+
+function extractJavaScriptRelationships(content, file, symbols) {
+  const relationships = [];
+  content.split(/\r?\n/).forEach((line, index) => {
+    for (const match of line.matchAll(/\bimport\s+(?:[^'"]+\s+from\s+)?["']([^"']+)["']/g)) {
+      relationships.push(createRelationship(file, "IMPORTS", match[1], index + 1, { syntax: "import" }, symbols));
+    }
+    for (const match of line.matchAll(/\bexport\s+[^'"]+\s+from\s+["']([^"']+)["']/g)) {
+      relationships.push(createRelationship(file, "IMPORTS", match[1], index + 1, { syntax: "export-from" }, symbols));
+    }
+    for (const match of line.matchAll(/\brequire\(["']([^"']+)["']\)/g)) {
+      relationships.push(createRelationship(file, "IMPORTS", match[1], index + 1, { syntax: "require" }, symbols));
+    }
+  });
+  return relationships;
+}
+
+function extractSwiftRelationships(content, file, symbols) {
+  const relationships = [];
+  content.split(/\r?\n/).forEach((line, index) => {
+    const importMatch = line.match(/^\s*import\s+([A-Za-z_]\w*)/);
+    if (importMatch) {
+      relationships.push(createRelationship(file, "IMPORTS", importMatch[1], index + 1, { syntax: "import" }, symbols));
+    }
+    const conformsMatch = line.match(/\b(?:class|struct|enum|actor)\s+([A-Za-z_]\w*)\s*:\s*([^{]+)/);
+    if (conformsMatch) {
+      for (const target of conformsMatch[2].split(",").map((item) => item.trim().split(/\s+/)[0]).filter(Boolean)) {
+        relationships.push(createRelationship(file, "REFERENCES", target, index + 1, { syntax: "conformance", source: conformsMatch[1] }, symbols));
+      }
+    }
+  });
+  return relationships;
+}
+
+function extractDartRelationships(content, file, symbols) {
+  const relationships = [];
+  content.split(/\r?\n/).forEach((line, index) => {
+    for (const match of line.matchAll(/^\s*(?:import|export|part)\s+['"]([^'"]+)['"]/g)) {
+      relationships.push(createRelationship(file, "IMPORTS", match[1], index + 1, { syntax: line.trim().split(/\s+/)[0] }, symbols));
+    }
+    const extendsMatch = line.match(/\bclass\s+([A-Za-z_]\w*)\s+(?:extends|with|implements)\s+([^{]+)/);
+    if (extendsMatch) {
+      for (const target of extendsMatch[2].split(",").map((item) => item.trim().split(/\s+/)[0]).filter(Boolean)) {
+        relationships.push(createRelationship(file, "REFERENCES", target, index + 1, { syntax: "type-reference", source: extendsMatch[1] }, symbols));
+      }
+    }
+  });
+  return relationships;
+}
+
+function extractCallRelationships(content, file, symbols) {
+  const keywords = new Set([
+    "if", "for", "while", "switch", "catch", "return", "throw", "new", "typeof",
+    "sizeof", "nameof", "await", "guard", "let", "var", "func", "function", "class",
+    "struct", "enum", "protocol", "interface", "record", "using", "import"
+  ]);
+  const relationships = [];
+  content.split(/\r?\n/).forEach((line, index) => {
+    const stripped = line.replace(/(["'`]).*?\1/g, "");
+    for (const match of stripped.matchAll(/\b([A-Za-z_][$\w]*(?:\.[A-Za-z_][$\w]*)?)\s*\(/g)) {
+      const target = match[1];
+      const root = target.split(".")[0];
+      if (!keywords.has(root) && !keywords.has(target)) {
+        relationships.push(createRelationship(file, "CALLS", target, index + 1, { syntax: "call-expression" }, symbols));
+      }
+    }
+  });
+  return relationships;
+}
+
+function collectJsonSymbols(value, file, symbols, prefix = "", depth = 0) {
+  if (!value || typeof value !== "object" || depth > 4) {
+    return;
+  }
+  if (Array.isArray(value)) {
+    return;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    const fullName = prefix ? `${prefix}.${key}` : key;
+    symbols.push(createSymbol(file, "json_key", fullName, 1));
+    collectJsonSymbols(child, file, symbols, fullName, depth + 1);
+  }
 }
 
 function buildChunkEmbeddingText(chunk) {
@@ -1290,11 +1751,12 @@ async function ensureNeo4jSchema() {
   await runNeo4jStatements([
     { statement: "CREATE CONSTRAINT repo_id IF NOT EXISTS FOR (r:Repository) REQUIRE r.id IS UNIQUE" },
     { statement: "CREATE CONSTRAINT file_key IF NOT EXISTS FOR (f:CodeFile) REQUIRE f.key IS UNIQUE" },
-    { statement: "CREATE CONSTRAINT symbol_key IF NOT EXISTS FOR (s:CodeSymbol) REQUIRE s.key IS UNIQUE" }
+    { statement: "CREATE CONSTRAINT symbol_key IF NOT EXISTS FOR (s:CodeSymbol) REQUIRE s.key IS UNIQUE" },
+    { statement: "CREATE CONSTRAINT reference_key IF NOT EXISTS FOR (r:CodeReference) REQUIRE r.key IS UNIQUE" }
   ]);
 }
 
-async function upsertNeo4jRepository(workspace, repository, files, symbols) {
+async function upsertNeo4jRepository(workspace, repository, files, symbols, relationships = []) {
   if (!neo4jPassword) {
     return;
   }
@@ -1352,6 +1814,28 @@ async function upsertNeo4jRepository(workspace, repository, files, symbols) {
         line: symbol.line
       }
     })),
+    ...relationships.map((relationship) => ({
+      statement: `
+        MATCH (f:CodeFile {key: $fileKey})
+        MERGE (ref:CodeReference {key: $referenceKey})
+        SET ref.name = $targetName, ref.relationship_type = $relationshipType,
+            ref.language = $language, ref.repository_id = $repositoryId,
+            ref.workspace_id = $workspaceId, ref.source_file_path = $sourceFilePath,
+            ref.line = $line
+        MERGE (f)-[:${neo4jRelationshipType(relationship.type)}]->(ref)
+      `,
+      parameters: {
+        workspaceId: workspace.id,
+        repositoryId: repository.id,
+        fileKey: `${repository.id}:${relationship.sourceFilePath}`,
+        referenceKey: `${repository.id}:${relationship.sourceFilePath}:${relationship.type}:${relationship.targetName}:${relationship.line}`,
+        targetName: relationship.targetName,
+        relationshipType: relationship.type,
+        language: relationship.language,
+        sourceFilePath: relationship.sourceFilePath,
+        line: relationship.line
+      }
+    })),
     {
       statement: `
         MATCH (w:Workspace {id: $workspaceId})-[:CONTAINS]->(:Repository)-[:CONTAINS]->(:CodeFile)-[:DECLARES]->(a:CodeSymbol)
@@ -1381,11 +1865,18 @@ async function deleteNeo4jRepository(repositoryId) {
         MATCH (r:Repository {id: $repositoryId})
         OPTIONAL MATCH (r)-[:CONTAINS]->(f:CodeFile)
         OPTIONAL MATCH (f)-[:DECLARES]->(s:CodeSymbol)
-        DETACH DELETE s, f, r
+        OPTIONAL MATCH (f)-[:IMPORTS|CALLS|REFERENCES|DEPENDS_ON]->(ref:CodeReference)
+        DETACH DELETE s, ref, f, r
       `,
       parameters: { repositoryId }
     }
   ]);
+}
+
+function neo4jRelationshipType(type) {
+  const allowed = new Set(["IMPORTS", "CALLS", "REFERENCES", "DEPENDS_ON"]);
+  const normalized = String(type || "REFERENCES").toUpperCase();
+  return allowed.has(normalized) ? normalized : "REFERENCES";
 }
 
 async function runNeo4jStatements(statements) {

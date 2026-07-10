@@ -104,6 +104,21 @@ CREATE TABLE IF NOT EXISTS code_chunks (
     UNIQUE(repository_id, file_path, chunk_index)
 );
 
+CREATE TABLE IF NOT EXISTS code_relationships (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    repository_id UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+    relationship_type TEXT NOT NULL,
+    source_name TEXT,
+    target_name TEXT NOT NULL,
+    source_file_path TEXT NOT NULL,
+    target_file_path TEXT,
+    language TEXT NOT NULL,
+    start_line INTEGER,
+    metadata JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS code_index_jobs (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     repository_id UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
@@ -146,5 +161,9 @@ CREATE INDEX IF NOT EXISTS idx_code_symbols_repository_id ON code_symbols(reposi
 CREATE INDEX IF NOT EXISTS idx_code_chunks_workspace_id ON code_chunks(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_code_chunks_repository_id ON code_chunks(repository_id);
 CREATE INDEX IF NOT EXISTS idx_code_chunks_file_path ON code_chunks(file_path);
+CREATE INDEX IF NOT EXISTS idx_code_relationships_workspace_id ON code_relationships(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_code_relationships_repository_id ON code_relationships(repository_id);
+CREATE INDEX IF NOT EXISTS idx_code_relationships_target_name ON code_relationships(target_name);
+CREATE INDEX IF NOT EXISTS idx_code_relationships_type ON code_relationships(relationship_type);
 CREATE INDEX IF NOT EXISTS idx_code_index_jobs_repository_id ON code_index_jobs(repository_id);
 CREATE INDEX IF NOT EXISTS idx_code_index_jobs_workspace_id ON code_index_jobs(workspace_id);

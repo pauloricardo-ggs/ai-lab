@@ -1,11 +1,35 @@
 # roslyn-indexer
 
-Responsavel por indexar projetos C# e VB.NET.
+Servico HTTP interno responsavel por analisar arquivos C# com Roslyn.
 
-## Extrair
+## Endpoint
 
-- solution
-- project
+```http
+GET /health
+POST /analyze
+```
+
+Payload:
+
+```json
+{
+  "file_path": "src/Foo.cs",
+  "language": "csharp",
+  "content": "..."
+}
+```
+
+Resposta:
+
+```json
+{
+  "symbols": [],
+  "relationships": []
+}
+```
+
+## Extrai
+
 - namespace
 - class
 - interface
@@ -15,17 +39,11 @@ Responsavel por indexar projetos C# e VB.NET.
 - method
 - property
 - constructor
-- attribute
-- inheritance
-- implementation
-- method calls
-- references
+- using/imports
+- inheritance/interfaces como `REFERENCES`
+- method calls como `CALLS`
 
-## Gravar
-
-- PostgreSQL: `code_symbols`
-- Neo4j: nos e relacionamentos
-- Qdrant: apenas via `embedding-worker`
+O Admin UI consome esse servico durante a indexacao de arquivos `.cs`. Se o servico estiver indisponivel, o Admin usa fallback local baseado em padroes.
 
 ## Relacionamentos Neo4j
 
@@ -33,7 +51,5 @@ Responsavel por indexar projetos C# e VB.NET.
 - `DECLARES`
 - `CALLS`
 - `REFERENCES`
-- `IMPLEMENTS`
-- `INHERITS`
-- `USES`
-
+- `IMPORTS`
+- `DEPENDS_ON`

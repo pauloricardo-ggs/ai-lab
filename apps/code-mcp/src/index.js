@@ -97,7 +97,19 @@ async function executeTool(tool, payload) {
   }
 
   if (tool === "code.find_references") {
-    return searchCode(tool, workspace, { ...payload, query: payload.symbol || payload.query || payload.name });
+    return searchRelationships(tool, workspace, payload, ["REFERENCES", "IMPORTS", "DEPENDS_ON", "CALLS"]);
+  }
+
+  if (tool === "code.find_callers") {
+    return searchRelationships(tool, workspace, payload, ["CALLS"], { targetOnly: true });
+  }
+
+  if (tool === "code.find_callees") {
+    return searchRelationships(tool, workspace, payload, ["CALLS"], { sourceOnly: true });
+  }
+
+  if (tool === "code.find_dependencies") {
+    return searchRelationships(tool, workspace, payload, ["IMPORTS", "DEPENDS_ON"]);
   }
 
   return {
@@ -109,6 +121,51 @@ async function executeTool(tool, payload) {
     matches: [],
     relationships: [],
     note: "Consulta real ainda limitada a chunks e simbolos indexados. Use code.search_code, code.semantic_search_code ou code.search_symbol."
+  };
+}
+
+async function searchRelationships(tool, workspace, payload, relationshipTypes, options = {}) {
+  const search = String(payload.symbol || payload.name || payload.query || payload.target || payload.source || "").trim();
+  const limit = Math.min(Number(payload.limit || 25), 100);
+  const params = [workspace.id, relationshipTypes];
+  const filters = ["workspace_id = $1", "relationship_type = ANY($2)"];
+
+  if (search) {
+    params.push(`%${search}%`);
+    const likeParam = `$${params.length}`;
+    if (options.targetOnly) {
+      filters.push(`target_name ILIKE ${likeParam}`);
+    } else if (options.sourceOnly) {
+      filters.push(`(source_name ILIKE ${likeParam} OR source_file_path ILIKE ${likeParam})`);
+    } else {
+      filters.push(`(target_name ILIKE ${likeParam} OR COALESCE(source_name, '') ILIKE ${likeParam} OR source_file_path ILIKE ${likeParam})`);
+    }
+  }
+
+  if (payload.repository_id) {
+    params.push(payload.repository_id);
+    filters.push(`repository_id = $${params.length}`);
+  }
+
+  params.push(limit);
+  const result = await query(
+    `SELECT id, repository_id, relationship_type, source_name, target_name,
+            source_file_path, target_file_path, language, start_line, metadata
+     FROM code_relationships
+     WHERE ${filters.join(" AND ")}
+     ORDER BY source_file_path ASC, start_line ASC
+     LIMIT $${params.length}`,
+    params
+  );
+
+  return {
+    status: "ok",
+    tool,
+    workspace: workspace.slug,
+    repository_id: payload.repository_id || null,
+    query: search || null,
+    relationships: result.rows,
+    matches: result.rows
   };
 }
 

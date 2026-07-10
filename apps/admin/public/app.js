@@ -165,7 +165,7 @@ function renderServices() {
       </div>
       <footer>
         <span class="status-pill ${service.online ? "online" : "offline"}">${service.online ? "Online" : "Offline"}</span>
-        <button class="secondary-button" data-open-service="${service.id}">${service.kind === "api" ? "Console" : "Abrir"}</button>
+        <button class="secondary-button" data-open-service="${service.id}" ${service.can_open ? "" : "disabled"}>${service.can_open ? service.kind === "api" ? "Console" : "Abrir" : "Interno"}</button>
       </footer>
     </article>
   `).join("");
@@ -643,7 +643,7 @@ document.addEventListener("click", async (event) => {
       routeTo("admin");
     } else if (service.id === "mcp-gateway") {
       routeTo("mcp");
-    } else {
+    } else if (service.can_open && service.url) {
       window.open(service.url, "_blank", "noopener,noreferrer");
     }
     return;
