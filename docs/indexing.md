@@ -21,33 +21,82 @@
 Na versao atual, a Admin UI dispara uma indexacao real em background logo apos o clone. O repositorio e a unidade de ingestao, mas o escopo do indice e do grafo e o workspace:
 
 1. escaneia arquivos suportados no repositorio
-2. cria chunks por linhas
-3. extrai simbolos por linguagem
+2. extrai simbolos por linguagem
+3. cria chunks estruturais por simbolo quando possivel, com fallback por janelas de linhas
 4. gera embeddings locais via Ollama
 5. grava chunks em `code_chunks`
 6. grava simbolos em `code_symbols`
 7. grava relacoes em `code_relationships`
 8. envia vetores para Qdrant
 9. cria grafo no Neo4j com `Workspace`, `Repository`, `CodeFile`, `CodeSymbol` e `CodeReference`
-10. cria relacoes cross-repo simples entre simbolos de mesmo nome dentro do workspace
+10. resolve relacoes para arquivos, simbolos ou repositorios reais dentro do workspace
+11. cria relacoes cross-repo simples entre simbolos de mesmo nome dentro do workspace
 
 Indexadores especificos:
 
-- C#: Roslyn Indexer (`roslyn-indexer`) para namespaces, tipos, metodos, propriedades, using, heranca/referencias e chamadas. Se o servico estiver indisponivel, o Admin usa fallback local.
+- C#: Roslyn Indexer (`roslyn-indexer`) para namespaces, tipos, metodos, propriedades, using, heranca/referencias e chamadas. Ele usa `SemanticModel` quando possivel para nomes qualificados, ranges e hierarquia. Se o servico estiver indisponivel, o Admin usa fallback local.
 - TypeScript/JavaScript: imports, exports, require, classes, interfaces, types, enums, funcoes/metodos e chamadas.
 - HTML/CSS: ids/classes/seletores e referencias a assets/links/imports.
 - Swift: imports, tipos, protocolos, funcoes, conformances e chamadas.
 - Dart: imports/exports/parts, tipos, mixins, extensions, funcoes, referencias e chamadas.
 - JSON/YAML: chaves estruturais e dependencias conhecidas, como `package.json` e `pubspec.yaml`.
 - SQL: tabelas, views, procedures/functions/triggers e referencias via `FROM`, `JOIN`, `REFERENCES`, `UPDATE`, `INSERT`.
+- Protobuf (`.proto`): packages, messages, services, RPCs, enums, oneofs, imports, campos tipados e request/response de RPC.
 
 Outras linguagens textuais entram pelo indexador generico, que extrai chaves e headings quando possivel.
+
+Manifestos de dependencias tambem geram relacoes `DEPENDS_ON`, incluindo `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `pubspec.yaml`, `pubspec.lock`, `.csproj`, `Directory.Packages.props`, `packages.config`, `Package.swift` e `Podfile`.
 
 O status do repositorio muda para `indexed` quando a indexacao termina. Se falhar, o status fica `index_error` e o repositorio pode ser reindexado pela Admin UI.
 
 Cada execucao grava um job em `code_index_jobs` com `scope = workspace`, fase atual, repositorio atual, arquivo atual, total de arquivos do repositorio, arquivos indexaveis, arquivos ignorados, total de chunks, chunks processados, simbolos e erro. A Admin UI consulta esses jobs para exibir progresso em tempo real na tela de detalhe do workspace, separando jobs em execucao do historico finalizado paginado.
 
 Um repositorio nao pode ter duas indexacoes ativas ao mesmo tempo. Se ja houver job `pending`, `running` ou `canceling`, a tentativa de reindexacao retorna `repository_index_already_running`. Jobs ativos podem ser cancelados pela Admin UI; o job passa por `canceling` e termina como `canceled`.
+
+## Indexacao Incremental
+
+A tabela `code_index_files` mantem um inventario por arquivo com caminho, linguagem, tamanho, hash, status, motivo de ignorado e erro.
+
+Durante a reindexacao:
+
+1. arquivos inalterados pelo hash sao preservados
+2. arquivos novos ou alterados sao limpos e reprocessados
+3. arquivos removidos do repositorio sao removidos de PostgreSQL, Qdrant e Neo4j
+4. arquivos ignorados sao registrados com motivo
+5. erros isolados por arquivo ficam no inventario e aparecem no relatorio de qualidade
+6. relacoes do workspace sao re-resolvidas para refletir arquivos, simbolos e repositorios novos, alterados ou removidos
+
+## Resolucao de Relacoes
+
+As relacoes extraidas deixam de ser apenas texto bruto. Apos indexar os arquivos, a plataforma tenta resolver cada relacao em camadas:
+
+1. imports/caminhos relativos para arquivos indexados no mesmo repositorio
+2. chamadas e referencias para simbolos do mesmo repositorio
+3. chamadas e referencias para simbolos de outros repositorios do mesmo workspace
+4. dependencias para repositorios do workspace por nome ou URL
+
+O resultado fica em `code_relationships` com `source_symbol_id`, `target_symbol_id`, `target_repository_id`, `target_file_path`, `resolution_status` e `resolution_metadata`. No Neo4j, referencias resolvidas recebem arestas `RESOLVES_TO`; simbolos que originaram referencias recebem `EMITS_REFERENCE`.
+
+## Chunks Estruturais e Hierarquia
+
+Quando o indexador encontra classes, funcoes, metodos, tipos ou objetos estruturais equivalentes, os chunks sao gerados por simbolo e recebem metadados como `symbol_name`, `symbol_type`, `symbol_full_name`, `parent_name` e `parent_full_name`. Arquivos sem estrutura suficiente continuam usando janelas de linhas.
+
+Os simbolos gravam `parent_name` e `parent_full_name` em `code_symbols`. No Neo4j, o relacionamento `CONTAINS_SYMBOL` representa a hierarquia local quando ela e conhecida.
+
+## Relatorio de Qualidade
+
+A Admin UI expoe um relatorio por repositorio com:
+
+- total de arquivos inventariados
+- arquivos indexados, ignorados e com erro
+- arquivos por linguagem
+- motivos de ignorados
+- simbolos por linguagem
+- simbolos por tipo
+- relacoes por tipo
+- relacoes por status de resolucao
+- relacoes resolvidas/nao resolvidas por linguagem
+- ate 100 arquivos ignorados ou com erro
 
 ## Embeddings Locais
 

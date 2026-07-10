@@ -6,9 +6,9 @@
 - Ollama: runtime local para modelos open source.
 - PostgreSQL: metadados, workspaces, documentos, chunks, repositorios, simbolos e auditoria MCP.
 - Qdrant: vetores de documentos e simbolos de codigo.
-- Neo4j: grafo tecnico de dependencias e relacoes entre simbolos.
+- Neo4j: grafo tecnico de dependencias, hierarquia de simbolos e relacoes resolvidas entre arquivos, simbolos e repositorios.
 - Admin UI: portal operacional para dashboard, workspaces, repositorios e console MCP.
-- Roslyn Indexer: parser C# para extracao de simbolos e relacoes tecnicas.
+- Roslyn Indexer: parser C# com suporte a `SemanticModel` para extracao de simbolos, ranges, hierarquia e relacoes tecnicas.
 - MCP Gateway: autenticacao, roteamento, rate limit, auditoria e padronizacao de erros.
 - Knowledge MCP: consultas documentais e semanticas.
 - Code MCP: consultas de simbolos, referencias, dependencias e arquitetura.

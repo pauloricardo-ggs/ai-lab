@@ -72,6 +72,10 @@ const languageByExtension = new Map([
   [".yml", "yaml"],
   [".yaml", "yaml"],
   [".xml", "xml"],
+  [".csproj", "xml"],
+  [".fsproj", "xml"],
+  [".props", "xml"],
+  [".targets", "xml"],
   [".plist", "xml"],
   [".pbxproj", "xcode"],
   [".xcscheme", "xml"],
@@ -85,12 +89,23 @@ const languageByExtension = new Map([
   [".sass", "css"],
   [".less", "css"],
   [".sql", "sql"],
+  [".proto", "protobuf"],
   [".sh", "shell"]
 ]);
 
 const languageByFilename = new Map([
   ["dockerfile", "dockerfile"],
   ["makefile", "makefile"],
+  ["package.json", "json"],
+  ["package-lock.json", "json"],
+  ["pnpm-lock.yaml", "yaml"],
+  ["yarn.lock", "yaml"],
+  ["pubspec.yaml", "yaml"],
+  ["pubspec.lock", "yaml"],
+  ["package.swift", "swift"],
+  ["podfile", "ruby"],
+  ["packages.config", "xml"],
+  ["directory.packages.props", "xml"],
   ["license", "text"],
   [".gitignore", "gitignore"],
   [".dockerignore", "dockerignore"],
@@ -461,6 +476,25 @@ async function ensureApplicationSchema() {
       created_at TIMESTAMP NOT NULL DEFAULT NOW()
     )
   `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS code_index_files (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      repository_id UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+      file_path TEXT NOT NULL,
+      language TEXT,
+      size_bytes INTEGER NOT NULL DEFAULT 0,
+      content_hash TEXT,
+      status TEXT NOT NULL,
+      skipped_reason TEXT,
+      error TEXT,
+      indexed_at TIMESTAMP,
+      metadata JSONB NOT NULL DEFAULT '{}',
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      UNIQUE(repository_id, file_path)
+    )
+  `);
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'workspace'");
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS phase TEXT");
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS current_repository TEXT");
@@ -475,14 +509,29 @@ async function ensureApplicationSchema() {
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS started_at TIMESTAMP");
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS finished_at TIMESTAMP");
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS error TEXT");
+  await query("ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS parent_name TEXT");
+  await query("ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS parent_full_name TEXT");
+  await query("ALTER TABLE code_relationships ADD COLUMN IF NOT EXISTS source_symbol_id UUID REFERENCES code_symbols(id) ON DELETE SET NULL");
+  await query("ALTER TABLE code_relationships ADD COLUMN IF NOT EXISTS target_symbol_id UUID REFERENCES code_symbols(id) ON DELETE SET NULL");
+  await query("ALTER TABLE code_relationships ADD COLUMN IF NOT EXISTS target_repository_id UUID REFERENCES repositories(id) ON DELETE SET NULL");
+  await query("ALTER TABLE code_relationships ADD COLUMN IF NOT EXISTS resolution_status TEXT NOT NULL DEFAULT 'unresolved'");
+  await query("ALTER TABLE code_relationships ADD COLUMN IF NOT EXISTS resolution_metadata JSONB NOT NULL DEFAULT '{}'");
   await query("CREATE INDEX IF NOT EXISTS idx_code_chunks_workspace_id ON code_chunks(workspace_id)");
   await query("CREATE INDEX IF NOT EXISTS idx_code_chunks_repository_id ON code_chunks(repository_id)");
   await query("CREATE INDEX IF NOT EXISTS idx_code_chunks_file_path ON code_chunks(file_path)");
   await query("CREATE INDEX IF NOT EXISTS idx_code_symbols_repository_id ON code_symbols(repository_id)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_symbols_parent_name ON code_symbols(parent_name)");
   await query("CREATE INDEX IF NOT EXISTS idx_code_relationships_workspace_id ON code_relationships(workspace_id)");
   await query("CREATE INDEX IF NOT EXISTS idx_code_relationships_repository_id ON code_relationships(repository_id)");
   await query("CREATE INDEX IF NOT EXISTS idx_code_relationships_target_name ON code_relationships(target_name)");
   await query("CREATE INDEX IF NOT EXISTS idx_code_relationships_type ON code_relationships(relationship_type)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_relationships_source_symbol_id ON code_relationships(source_symbol_id)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_relationships_target_symbol_id ON code_relationships(target_symbol_id)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_relationships_target_repository_id ON code_relationships(target_repository_id)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_relationships_resolution_status ON code_relationships(resolution_status)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_index_files_workspace_id ON code_index_files(workspace_id)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_index_files_repository_id ON code_index_files(repository_id)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_index_files_status ON code_index_files(status)");
   await query("CREATE INDEX IF NOT EXISTS idx_code_index_jobs_repository_id ON code_index_jobs(repository_id)");
   await query("CREATE INDEX IF NOT EXISTS idx_code_index_jobs_workspace_id ON code_index_jobs(workspace_id)");
 }
@@ -608,6 +657,135 @@ async function listRepositories(workspaceIdOrSlug) {
   );
 
   return { workspace, repositories: result.rows };
+}
+
+async function getRepositoryIndexReport(workspaceIdOrSlug, repositoryId) {
+  const workspace = await getWorkspace(workspaceIdOrSlug);
+  if (!workspace) {
+    const error = new Error("workspace_not_found");
+    error.status = 404;
+    throw error;
+  }
+
+  const repositoryResult = await query(
+    `SELECT id, workspace_id, name, provider, url, default_branch, local_path, status, metadata, created_at, updated_at
+     FROM repositories
+     WHERE id::text = $1 AND workspace_id = $2`,
+    [repositoryId, workspace.id]
+  );
+  const repository = repositoryResult.rows[0];
+  if (!repository) {
+    const error = new Error("repository_not_found");
+    error.status = 404;
+    throw error;
+  }
+
+  const filesSummary = await query(
+    `SELECT
+       COUNT(*)::int AS total,
+       COUNT(*) FILTER (WHERE status = 'indexed')::int AS indexed,
+       COUNT(*) FILTER (WHERE status = 'skipped')::int AS skipped,
+       COUNT(*) FILTER (WHERE status = 'error')::int AS errors
+     FROM code_index_files
+     WHERE repository_id = $1`,
+    [repository.id]
+  );
+  const ignoredReasons = await query(
+    `SELECT COALESCE(skipped_reason, 'unknown') AS reason, COUNT(*)::int AS count
+     FROM code_index_files
+     WHERE repository_id = $1 AND status = 'skipped'
+     GROUP BY COALESCE(skipped_reason, 'unknown')
+     ORDER BY count DESC, reason ASC`,
+    [repository.id]
+  );
+  const symbolsByLanguage = await query(
+    `SELECT language, COUNT(*)::int AS count
+     FROM code_symbols
+     WHERE repository_id = $1
+     GROUP BY language
+     ORDER BY count DESC, language ASC`,
+    [repository.id]
+  );
+  const filesByLanguage = await query(
+    `SELECT COALESCE(language, 'unknown') AS language,
+            COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE status = 'indexed')::int AS indexed,
+            COUNT(*) FILTER (WHERE status = 'skipped')::int AS skipped,
+            COUNT(*) FILTER (WHERE status = 'error')::int AS errors
+     FROM code_index_files
+     WHERE repository_id = $1
+     GROUP BY COALESCE(language, 'unknown')
+     ORDER BY total DESC, language ASC`,
+    [repository.id]
+  );
+  const symbolsByType = await query(
+    `SELECT symbol_type AS type, COUNT(*)::int AS count
+     FROM code_symbols
+     WHERE repository_id = $1
+     GROUP BY symbol_type
+     ORDER BY count DESC, symbol_type ASC`,
+    [repository.id]
+  );
+  const relationshipsByType = await query(
+    `SELECT relationship_type AS type, COUNT(*)::int AS count
+     FROM code_relationships
+     WHERE repository_id = $1
+     GROUP BY relationship_type
+     ORDER BY count DESC, relationship_type ASC`,
+    [repository.id]
+  );
+  const relationshipsByResolution = await query(
+    `SELECT resolution_status AS status, COUNT(*)::int AS count
+     FROM code_relationships
+     WHERE repository_id = $1
+     GROUP BY resolution_status
+     ORDER BY count DESC, status ASC`,
+    [repository.id]
+  );
+  const relationshipsByLanguage = await query(
+    `SELECT language,
+            COUNT(*)::int AS total,
+            COUNT(*) FILTER (WHERE resolution_status <> 'unresolved')::int AS resolved,
+            COUNT(*) FILTER (WHERE resolution_status = 'unresolved')::int AS unresolved
+     FROM code_relationships
+     WHERE repository_id = $1
+     GROUP BY language
+     ORDER BY total DESC, language ASC`,
+    [repository.id]
+  );
+  const fileIssues = await query(
+    `SELECT file_path, language, status, skipped_reason, error, updated_at
+     FROM code_index_files
+     WHERE repository_id = $1 AND status IN ('skipped', 'error')
+     ORDER BY status DESC, file_path ASC
+     LIMIT 100`,
+    [repository.id]
+  );
+  const latestJob = await query(
+    `SELECT id, status, phase, total_files, files_indexed, total_repository_files,
+            skipped_files, total_chunks, chunks_indexed, symbols_indexed,
+            started_at, finished_at, error, created_at
+     FROM code_index_jobs
+     WHERE repository_id = $1
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [repository.id]
+  );
+
+  return {
+    workspace,
+    repository,
+    summary: filesSummary.rows[0] || { total: 0, indexed: 0, skipped: 0, errors: 0 },
+    ignored_reasons: ignoredReasons.rows,
+    files_by_language: filesByLanguage.rows,
+    symbols_by_language: symbolsByLanguage.rows,
+    symbols_by_type: symbolsByType.rows,
+    relationships_by_type: relationshipsByType.rows,
+    relationships_by_resolution: relationshipsByResolution.rows,
+    relationships_by_language: relationshipsByLanguage.rows,
+    file_issues: fileIssues.rows,
+    latest_job: latestJob.rows[0] || null
+  };
 }
 
 async function listWorkspaceIndexJobs(workspaceIdOrSlug, options = {}) {
@@ -785,10 +963,9 @@ async function indexRepository(workspace, repository) {
   );
   const jobId = job.rows[0].id;
   activeIndexJobs.set(jobId, { controller, repositoryId: repository.id, workspaceId: workspace.id });
+  let activeFilePath = null;
 
   try {
-    assertIndexNotCanceled(controller.signal);
-    await cleanupRepositoryIndex(repository.id);
     assertIndexNotCanceled(controller.signal);
     await ensureQdrantCollection(codeCollection);
     assertIndexNotCanceled(controller.signal);
@@ -798,9 +975,35 @@ async function indexRepository(workspace, repository) {
     assertIndexNotCanceled(controller.signal);
     const scan = await collectIndexableFiles(repository.local_path);
     const files = scan.files;
-    const chunks = [];
-    const symbols = [];
-    const relationships = [];
+    const previousFiles = await listRepositoryIndexFiles(repository.id);
+    const hasFileInventory = previousFiles.size > 0;
+    if (!hasFileInventory && await repositoryHasLegacyIndexData(repository.id)) {
+      await cleanupRepositoryIndex(repository.id);
+      previousFiles.clear();
+    }
+
+    const scannedPaths = new Set([...files, ...scan.ignored].map((file) => file.relativePath));
+    let deletedFiles = 0;
+    for (const [filePath] of previousFiles) {
+      assertIndexNotCanceled(controller.signal);
+      if (!scannedPaths.has(filePath)) {
+        await cleanupFileIndex(repository.id, filePath);
+        await query("DELETE FROM code_index_files WHERE repository_id = $1 AND file_path = $2", [repository.id, filePath]);
+        deletedFiles += 1;
+      }
+    }
+
+    for (const ignoredFile of scan.ignored) {
+      assertIndexNotCanceled(controller.signal);
+      const previous = previousFiles.get(ignoredFile.relativePath);
+      if (previous?.status === "indexed") {
+        await cleanupFileIndex(repository.id, ignoredFile.relativePath);
+      }
+      await upsertIndexFileRecord(workspace.id, repository.id, ignoredFile, "skipped", {
+        skippedReason: ignoredFile.reason,
+        metadata: { incremental: true }
+      });
+    }
 
     await updateIndexJob(jobId, {
       phase: "extracting",
@@ -808,132 +1011,134 @@ async function indexRepository(workspace, repository) {
       totalRepositoryFiles: scan.stats.totalFiles,
       skippedFiles: scan.stats.skippedFiles
     });
+
+    const graphFiles = [];
+    const graphSymbols = [];
+    const graphRelationships = [];
+    let indexedChunks = 0;
+    let indexedSymbols = 0;
+    let indexedRelationships = 0;
+    let changedFiles = 0;
+    let unchangedFiles = 0;
+    let erroredFiles = 0;
+    let totalChunks = 0;
+
     for (const file of files) {
       assertIndexNotCanceled(controller.signal);
+      activeFilePath = file.relativePath;
       await updateIndexJob(jobId, { currentFile: file.relativePath });
-      const content = await fs.readFile(file.absolutePath, "utf8");
-      const fileChunks = chunkContent(content);
-      const analysis = await analyzeCodeFile(content, file, controller.signal);
-      chunks.push(...fileChunks.map((chunk) => ({ ...chunk, file })));
-      symbols.push(...analysis.symbols);
-      relationships.push(...analysis.relationships);
-      await incrementIndexJob(jobId, { files: 1 });
-    }
 
-    let indexedChunks = 0;
-    await updateIndexJob(jobId, { phase: "embedding", totalChunks: chunks.length, currentFile: null });
-    for (const chunk of chunks) {
-      assertIndexNotCanceled(controller.signal);
-      await updateIndexJob(jobId, { currentFile: chunk.file.relativePath });
-      const pointId = randomUUID();
-      const embedding = await createEmbedding(buildChunkEmbeddingText(chunk), controller.signal);
-      assertIndexNotCanceled(controller.signal);
-      await upsertQdrantPoint(codeCollection, pointId, embedding, {
-        workspace_id: workspace.id,
-        workspace_slug: workspace.slug,
-        repository_id: repository.id,
-        repository_name: repository.name,
-        source_type: "code",
-        file_path: chunk.file.relativePath,
-        language: chunk.file.language,
-        chunk_index: chunk.index,
-        start_line: chunk.startLine,
-        end_line: chunk.endLine
-      });
-      await query(
-        `INSERT INTO code_chunks (
-          workspace_id, repository_id, file_path, language, chunk_index,
-          start_line, end_line, content, content_hash, qdrant_collection, qdrant_point_id, metadata
-        )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-        ON CONFLICT (repository_id, file_path, chunk_index)
-        DO UPDATE SET
-          content = EXCLUDED.content,
-          content_hash = EXCLUDED.content_hash,
-          qdrant_collection = EXCLUDED.qdrant_collection,
-          qdrant_point_id = EXCLUDED.qdrant_point_id,
-          metadata = EXCLUDED.metadata`,
-        [
-          workspace.id,
-          repository.id,
-          chunk.file.relativePath,
-          chunk.file.language,
-          chunk.index,
-          chunk.startLine,
-          chunk.endLine,
-          chunk.content,
-          sha256(chunk.content),
-          codeCollection,
-          pointId,
-          { indexed_by: "admin-ui", embedding_model: embeddingModel }
-        ]
-      );
-      indexedChunks += 1;
-      await incrementIndexJob(jobId, { chunks: 1 });
-    }
+      try {
+        const content = await fs.readFile(file.absolutePath, "utf8");
+        const contentHash = sha256(content);
+        const previous = previousFiles.get(file.relativePath);
+        if (previous?.status === "indexed" && previous.content_hash === contentHash) {
+          unchangedFiles += 1;
+          await incrementIndexJob(jobId, { files: 1 });
+          continue;
+        }
 
-    await updateIndexJob(jobId, { phase: "symbols", currentFile: null });
-    for (const symbol of symbols) {
-      assertIndexNotCanceled(controller.signal);
-      await query(
-        `INSERT INTO code_symbols (
-          workspace_id, repository_id, symbol_type, name, full_name, language,
-          file_path, start_line, end_line, metadata
-        )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-        [
-          workspace.id,
-          repository.id,
-          symbol.type,
-          symbol.name,
-          symbol.fullName,
-          symbol.language,
-          symbol.filePath,
-          symbol.line,
-          symbol.line,
-          { indexed_by: "admin-ui", ...(symbol.metadata || {}) }
-        ]
-      );
-    }
+        changedFiles += 1;
+        const analysis = await analyzeCodeFile(content, file, controller.signal);
+        await cleanupFileIndex(repository.id, file.relativePath);
+        const fileChunks = chunkContent(content, file, analysis.symbols);
+        totalChunks += fileChunks.length;
+        await updateIndexJob(jobId, { phase: "embedding", totalChunks });
 
-    for (const relationship of relationships) {
-      assertIndexNotCanceled(controller.signal);
-      await query(
-        `INSERT INTO code_relationships (
-          workspace_id, repository_id, relationship_type, source_name, target_name,
-          source_file_path, target_file_path, language, start_line, metadata
-        )
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-        [
-          workspace.id,
-          repository.id,
-          relationship.type,
-          relationship.sourceName,
-          relationship.targetName,
-          relationship.sourceFilePath,
-          relationship.targetFilePath || null,
-          relationship.language,
-          relationship.line,
-          relationship.metadata || {}
-        ]
-      );
-    }
+        for (const chunk of fileChunks) {
+          assertIndexNotCanceled(controller.signal);
+          const pointId = randomUUID();
+          const embedding = await createEmbedding(buildChunkEmbeddingText(chunk), controller.signal);
+          assertIndexNotCanceled(controller.signal);
+          await upsertQdrantPoint(codeCollection, pointId, embedding, {
+            workspace_id: workspace.id,
+            workspace_slug: workspace.slug,
+            repository_id: repository.id,
+            repository_name: repository.name,
+            source_type: "code",
+            file_path: chunk.file.relativePath,
+            language: chunk.file.language,
+            chunk_index: chunk.index,
+            start_line: chunk.startLine,
+            end_line: chunk.endLine
+          });
+          await insertCodeChunk(workspace.id, repository.id, chunk, pointId);
+          indexedChunks += 1;
+          await incrementIndexJob(jobId, { chunks: 1 });
+        }
 
-    await updateIndexJob(jobId, { phase: "graph", symbols: symbols.length });
+        await updateIndexJob(jobId, { phase: "symbols" });
+        for (const symbol of analysis.symbols) {
+          assertIndexNotCanceled(controller.signal);
+          await insertCodeSymbol(workspace.id, repository.id, symbol);
+        }
+        for (const relationship of analysis.relationships) {
+          assertIndexNotCanceled(controller.signal);
+          await insertCodeRelationship(workspace.id, repository.id, relationship);
+        }
+
+        indexedSymbols += analysis.symbols.length;
+        indexedRelationships += analysis.relationships.length;
+        graphFiles.push(file);
+        graphSymbols.push(...analysis.symbols);
+        graphRelationships.push(...analysis.relationships);
+        await upsertIndexFileRecord(workspace.id, repository.id, file, "indexed", {
+          contentHash,
+          metadata: {
+            incremental: true,
+            chunks: fileChunks.length,
+            symbols: analysis.symbols.length,
+            relationships: analysis.relationships.length
+          }
+        });
+        await incrementIndexJob(jobId, { files: 1 });
+      } catch (fileError) {
+        if (fileError instanceof IndexCanceledError || fileError.name === "AbortError") {
+          throw fileError;
+        }
+        erroredFiles += 1;
+        await cleanupFileIndex(repository.id, file.relativePath).catch((cleanupError) => console.error("file cleanup after index error failed", cleanupError));
+        await upsertIndexFileRecord(workspace.id, repository.id, file, "error", {
+          error: fileError instanceof Error ? fileError.message.slice(0, 1000) : "file_index_failed"
+        });
+        await incrementIndexJob(jobId, { files: 1 });
+      }
+    }
+    activeFilePath = null;
+
+    await updateIndexJob(jobId, { phase: "graph", symbols: indexedSymbols });
     assertIndexNotCanceled(controller.signal);
-    await upsertNeo4jRepository(workspace, repository, files, symbols, relationships);
+    if (graphFiles.length) {
+      await upsertNeo4jRepository(workspace, repository, graphFiles, graphSymbols, graphRelationships);
+    }
+    const resolutionSummary = await resolveWorkspaceRelationships(workspace.id);
+    await syncResolvedRelationshipsToNeo4j(workspace.id);
+    await linkWorkspaceRelatedSymbols(workspace.id);
     assertIndexNotCanceled(controller.signal);
     await query(
       `UPDATE code_index_jobs
        SET status = 'completed', phase = 'completed', current_file = NULL, files_indexed = $2, chunks_indexed = $3, symbols_indexed = $4, finished_at = NOW()
        WHERE id = $1`,
-      [jobId, files.length, indexedChunks, symbols.length]
+      [jobId, files.length, indexedChunks, indexedSymbols]
     );
 
-    return { files: files.length, chunks: indexedChunks, symbols: symbols.length, relationships: relationships.length };
+    return {
+      files: files.length,
+      changed_files: changedFiles,
+      unchanged_files: unchangedFiles,
+      deleted_files: deletedFiles,
+      errored_files: erroredFiles,
+      chunks: indexedChunks,
+      symbols: indexedSymbols,
+      relationships: indexedRelationships,
+      resolved_relationships: resolutionSummary.resolved,
+      unresolved_relationships: resolutionSummary.unresolved
+    };
   } catch (error) {
     if (error instanceof IndexCanceledError || error.name === "AbortError") {
-      await cleanupRepositoryIndex(repository.id).catch((cleanupError) => console.error("repository canceled index cleanup failed", cleanupError));
+      if (typeof activeFilePath === "string") {
+        await cleanupFileIndex(repository.id, activeFilePath).catch((cleanupError) => console.error("file cleanup after canceled index failed", cleanupError));
+      }
       await query(
         `UPDATE code_index_jobs
          SET status = 'canceled', phase = 'canceled', current_file = NULL, error = NULL, finished_at = NOW()
@@ -960,9 +1165,13 @@ function startRepositoryIndex(workspace, repository) {
     .then(async (indexResult) => {
       await query(
         `UPDATE repositories
-         SET status = 'indexed', metadata = metadata || $2::jsonb, updated_at = NOW()
+         SET status = $2, metadata = metadata || $3::jsonb, updated_at = NOW()
          WHERE id = $1`,
-        [repository.id, JSON.stringify({ index: indexResult })]
+        [
+          repository.id,
+          Number(indexResult.errored_files || 0) > 0 ? "indexed_with_errors" : "indexed",
+          JSON.stringify({ index: indexResult })
+        ]
       );
     })
     .catch(async (error) => {
@@ -1038,14 +1247,449 @@ async function incrementIndexJob(jobId, increments) {
 async function cleanupRepositoryIndex(repositoryId) {
   await deleteQdrantRepositoryPoints(repositoryId);
   await deleteNeo4jRepository(repositoryId);
+  await query("DELETE FROM code_index_files WHERE repository_id = $1", [repositoryId]);
   await query("DELETE FROM code_relationships WHERE repository_id = $1", [repositoryId]);
   await query("DELETE FROM code_symbols WHERE repository_id = $1", [repositoryId]);
   await query("DELETE FROM code_chunks WHERE repository_id = $1", [repositoryId]);
 }
 
+async function cleanupFileIndex(repositoryId, filePath) {
+  await deleteQdrantFilePoints(repositoryId, filePath);
+  await deleteNeo4jFile(repositoryId, filePath);
+  await query("DELETE FROM code_relationships WHERE repository_id = $1 AND source_file_path = $2", [repositoryId, filePath]);
+  await query("DELETE FROM code_symbols WHERE repository_id = $1 AND file_path = $2", [repositoryId, filePath]);
+  await query("DELETE FROM code_chunks WHERE repository_id = $1 AND file_path = $2", [repositoryId, filePath]);
+}
+
+async function listRepositoryIndexFiles(repositoryId) {
+  const result = await query(
+    `SELECT file_path, language, size_bytes, content_hash, status, skipped_reason, error
+     FROM code_index_files
+     WHERE repository_id = $1`,
+    [repositoryId]
+  );
+  return new Map(result.rows.map((row) => [row.file_path, row]));
+}
+
+async function upsertIndexFileRecord(workspaceId, repositoryId, file, status, details = {}) {
+  await query(
+    `INSERT INTO code_index_files (
+      workspace_id, repository_id, file_path, language, size_bytes, content_hash,
+      status, skipped_reason, error, indexed_at, metadata, updated_at
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())
+    ON CONFLICT (repository_id, file_path)
+    DO UPDATE SET
+      workspace_id = EXCLUDED.workspace_id,
+      language = EXCLUDED.language,
+      size_bytes = EXCLUDED.size_bytes,
+      content_hash = EXCLUDED.content_hash,
+      status = EXCLUDED.status,
+      skipped_reason = EXCLUDED.skipped_reason,
+      error = EXCLUDED.error,
+      indexed_at = EXCLUDED.indexed_at,
+      metadata = EXCLUDED.metadata,
+      updated_at = NOW()`,
+    [
+      workspaceId,
+      repositoryId,
+      file.relativePath,
+      file.language || null,
+      file.size || 0,
+      details.contentHash || null,
+      status,
+      details.skippedReason || null,
+      details.error || null,
+      status === "indexed" ? new Date().toISOString() : null,
+      details.metadata || {}
+    ]
+  );
+}
+
+async function repositoryHasLegacyIndexData(repositoryId) {
+  const result = await query(
+    `SELECT
+       (SELECT COUNT(*)::int FROM code_chunks WHERE repository_id = $1) AS chunks,
+       (SELECT COUNT(*)::int FROM code_symbols WHERE repository_id = $1) AS symbols,
+       (SELECT COUNT(*)::int FROM code_relationships WHERE repository_id = $1) AS relationships`,
+    [repositoryId]
+  );
+  const row = result.rows[0] || {};
+  return Number(row.chunks || 0) > 0 || Number(row.symbols || 0) > 0 || Number(row.relationships || 0) > 0;
+}
+
+async function resolveWorkspaceRelationships(workspaceId) {
+  const [relationships, symbols, repositories, files] = await Promise.all([
+    query(
+      `SELECT id, repository_id, relationship_type, source_name, target_name, source_file_path,
+              target_file_path, language, start_line
+       FROM code_relationships
+       WHERE workspace_id = $1`,
+      [workspaceId]
+    ),
+    query(
+      `SELECT id, repository_id, symbol_type, name, full_name, language,
+              file_path, start_line, end_line, parent_name, parent_full_name
+       FROM code_symbols
+       WHERE workspace_id = $1`,
+      [workspaceId]
+    ),
+    query(
+      `SELECT id, name, url
+       FROM repositories
+       WHERE workspace_id = $1`,
+      [workspaceId]
+    ),
+    query(
+      `SELECT repository_id, file_path, language
+       FROM code_index_files
+       WHERE workspace_id = $1 AND status = 'indexed'`,
+      [workspaceId]
+    )
+  ]);
+
+  const context = buildRelationshipResolutionContext(symbols.rows, repositories.rows, files.rows);
+  let resolved = 0;
+  let unresolved = 0;
+
+  for (const relationship of relationships.rows) {
+    const resolution = resolveRelationship(relationship, context);
+    if (resolution.status === "unresolved") {
+      unresolved += 1;
+    } else {
+      resolved += 1;
+    }
+    await query(
+      `UPDATE code_relationships
+       SET source_symbol_id = $2,
+           target_symbol_id = $3,
+           target_repository_id = $4,
+           target_file_path = $5,
+           resolution_status = $6,
+           resolution_metadata = $7
+       WHERE id = $1`,
+      [
+        relationship.id,
+        resolution.sourceSymbolId || null,
+        resolution.targetSymbolId || null,
+        resolution.targetRepositoryId || null,
+        resolution.targetFilePath || null,
+        resolution.status,
+        resolution.metadata || {}
+      ]
+    );
+  }
+
+  return { resolved, unresolved };
+}
+
+function buildRelationshipResolutionContext(symbols, repositories, files) {
+  const symbolsByRepo = new Map();
+  const filesByRepo = new Map();
+  const repositoriesByNormalizedName = new Map();
+
+  for (const symbol of symbols) {
+    const items = symbolsByRepo.get(symbol.repository_id) || [];
+    items.push(symbol);
+    symbolsByRepo.set(symbol.repository_id, items);
+  }
+
+  for (const file of files) {
+    const items = filesByRepo.get(file.repository_id) || [];
+    items.push(file);
+    filesByRepo.set(file.repository_id, items);
+  }
+
+  for (const repository of repositories) {
+    repositoriesByNormalizedName.set(normalizeLookupName(repository.name), repository);
+    const urlName = normalizeLookupName(inferRepoName(repository.url || repository.name));
+    if (urlName) {
+      repositoriesByNormalizedName.set(urlName, repository);
+    }
+  }
+
+  return { symbols, symbolsByRepo, repositories, repositoriesByNormalizedName, filesByRepo };
+}
+
+function resolveRelationship(relationship, context) {
+  const sourceSymbol = findSourceSymbol(relationship, context);
+  const baseResolution = {
+    sourceSymbolId: sourceSymbol?.id || null,
+    targetSymbolId: null,
+    targetRepositoryId: null,
+    targetFilePath: null,
+    status: "unresolved",
+    metadata: {}
+  };
+
+  const localFile = resolveFileTarget(relationship, context);
+  if (localFile) {
+    return {
+      ...baseResolution,
+      targetRepositoryId: localFile.repository_id,
+      targetFilePath: localFile.file_path,
+      status: "resolved_file",
+      metadata: { strategy: localFile.strategy }
+    };
+  }
+
+  const symbol = findTargetSymbol(relationship, context);
+  if (symbol) {
+    return {
+      ...baseResolution,
+      targetSymbolId: symbol.id,
+      targetRepositoryId: symbol.repository_id,
+      targetFilePath: symbol.file_path,
+      status: "resolved_symbol",
+      metadata: {
+        strategy: symbol.repository_id === relationship.repository_id ? "same_repository_symbol" : "workspace_symbol",
+        symbol_type: symbol.symbol_type,
+        symbol_name: symbol.name,
+        symbol_full_name: symbol.full_name
+      }
+    };
+  }
+
+  const repository = resolveRepositoryTarget(relationship.target_name, context);
+  if (repository) {
+    return {
+      ...baseResolution,
+      targetRepositoryId: repository.id,
+      status: "resolved_repository",
+      metadata: { strategy: "workspace_repository_name", repository_name: repository.name }
+    };
+  }
+
+  return baseResolution;
+}
+
+function findSourceSymbol(relationship, context) {
+  const candidates = context.symbolsByRepo.get(relationship.repository_id) || [];
+  const line = Number(relationship.start_line || 0);
+  const sourceName = normalizeLookupName(relationship.source_name || "");
+  return candidates
+    .filter((symbol) => symbol.file_path === relationship.source_file_path)
+    .filter((symbol) => !sourceName || normalizeLookupName(symbol.name) === sourceName || normalizeLookupName(symbol.full_name).endsWith(sourceName))
+    .filter((symbol) => !line || (Number(symbol.start_line || 0) <= line && Number(symbol.end_line || symbol.start_line || 0) >= line))
+    .sort((a, b) => Number(b.start_line || 0) - Number(a.start_line || 0))[0] || null;
+}
+
+function findTargetSymbol(relationship, context) {
+  const targetNames = targetLookupNames(relationship.target_name);
+  if (!targetNames.length) {
+    return null;
+  }
+
+  const sameRepository = context.symbolsByRepo.get(relationship.repository_id) || [];
+  const sameRepoMatch = rankTargetSymbols(relationship, sameRepository, targetNames)[0];
+  if (sameRepoMatch) {
+    return sameRepoMatch.symbol;
+  }
+
+  const workspaceMatches = rankTargetSymbols(relationship, context.symbols, targetNames);
+  return workspaceMatches[0]?.symbol || null;
+}
+
+function rankTargetSymbols(relationship, symbols, targetNames) {
+  const normalizedTargets = new Set(targetNames.map(normalizeLookupName));
+  return symbols
+    .map((symbol) => {
+      const name = normalizeLookupName(symbol.name);
+      const fullName = normalizeLookupName(symbol.full_name);
+      let score = 0;
+      if (normalizedTargets.has(name)) {
+        score += 80;
+      }
+      if ([...normalizedTargets].some((target) => fullName.endsWith(target))) {
+        score += 50;
+      }
+      if (symbol.language === relationship.language) {
+        score += 15;
+      }
+      if (symbol.file_path === relationship.source_file_path) {
+        score += 10;
+      }
+      if (symbol.repository_id === relationship.repository_id) {
+        score += 10;
+      }
+      return { symbol, score };
+    })
+    .filter((item) => item.score >= 50)
+    .sort((a, b) => b.score - a.score || Number(a.symbol.start_line || 0) - Number(b.symbol.start_line || 0));
+}
+
+function resolveFileTarget(relationship, context) {
+  const files = context.filesByRepo.get(relationship.repository_id) || [];
+  const target = relationship.target_file_path || relationship.target_name;
+  if (!target || !isPathLikeTarget(target)) {
+    return null;
+  }
+
+  const candidates = candidateImportPaths(relationship.source_file_path, target, relationship.language);
+  for (const candidate of candidates) {
+    const file = files.find((item) => normalizePathForLookup(item.file_path) === normalizePathForLookup(candidate));
+    if (file) {
+      return { ...file, strategy: "relative_import_path" };
+    }
+  }
+  return null;
+}
+
+function resolveRepositoryTarget(targetName, context) {
+  const normalized = normalizeLookupName(normalizeDependencyName(targetName));
+  if (!normalized) {
+    return null;
+  }
+  return context.repositoriesByNormalizedName.get(normalized) || null;
+}
+
+function candidateImportPaths(sourceFilePath, target, language) {
+  const sourceDir = path.posix.dirname(sourceFilePath.split(path.sep).join(path.posix.sep));
+  const normalizedTarget = target.split(path.sep).join(path.posix.sep).replace(/[?#].*$/, "");
+  const base = normalizedTarget.startsWith("/")
+    ? normalizedTarget.replace(/^\/+/, "")
+    : normalizedTarget.startsWith(".")
+      ? path.posix.normalize(path.posix.join(sourceDir, normalizedTarget))
+      : normalizedTarget;
+  const extensions = importExtensionsForLanguage(language);
+  const candidates = [base];
+  if (!path.posix.extname(base)) {
+    for (const extension of extensions) {
+      candidates.push(`${base}${extension}`);
+      candidates.push(path.posix.join(base, `index${extension}`));
+    }
+  }
+  return candidates;
+}
+
+function importExtensionsForLanguage(language) {
+  if (["javascript", "typescript"].includes(language)) {
+    return [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json"];
+  }
+  if (language === "dart") {
+    return [".dart"];
+  }
+  if (language === "swift") {
+    return [".swift"];
+  }
+  if (language === "html") {
+    return [".html", ".htm", ".css", ".js"];
+  }
+  if (language === "css") {
+    return [".css", ".scss", ".sass", ".less"];
+  }
+  if (language === "protobuf") {
+    return [".proto"];
+  }
+  return ["", ".json", ".yaml", ".yml", ".sql"];
+}
+
+function targetLookupNames(targetName) {
+  const value = String(targetName || "").trim();
+  if (!value) {
+    return [];
+  }
+  const withoutGenerics = value.replace(/<.*>/g, "");
+  const parts = withoutGenerics.split(/[.#/\\]/).filter(Boolean);
+  return [...new Set([value, withoutGenerics, parts.at(-1)].filter(Boolean))];
+}
+
+function isPathLikeTarget(target) {
+  return String(target || "").startsWith(".")
+    || String(target || "").startsWith("/")
+    || /[/\\]/.test(String(target || ""))
+    || Boolean(path.posix.extname(String(target || "")));
+}
+
+function normalizePathForLookup(value) {
+  return path.posix.normalize(String(value || "").split(path.sep).join(path.posix.sep)).replace(/^\.\//, "");
+}
+
+function normalizeLookupName(value) {
+  return String(value || "").trim().toLowerCase().replace(/\.git$/, "").replace(/[^a-z0-9_./@-]+/g, "");
+}
+
+async function insertCodeChunk(workspaceId, repositoryId, chunk, pointId) {
+  await query(
+    `INSERT INTO code_chunks (
+      workspace_id, repository_id, file_path, language, chunk_index,
+      start_line, end_line, content, content_hash, qdrant_collection, qdrant_point_id, metadata
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+    ON CONFLICT (repository_id, file_path, chunk_index)
+    DO UPDATE SET
+      content = EXCLUDED.content,
+      content_hash = EXCLUDED.content_hash,
+      qdrant_collection = EXCLUDED.qdrant_collection,
+      qdrant_point_id = EXCLUDED.qdrant_point_id,
+      metadata = EXCLUDED.metadata`,
+    [
+      workspaceId,
+      repositoryId,
+      chunk.file.relativePath,
+      chunk.file.language,
+      chunk.index,
+      chunk.startLine,
+      chunk.endLine,
+      chunk.content,
+      sha256(chunk.content),
+      codeCollection,
+      pointId,
+      { indexed_by: "admin-ui", embedding_model: embeddingModel, ...(chunk.metadata || {}) }
+    ]
+  );
+}
+
+async function insertCodeSymbol(workspaceId, repositoryId, symbol) {
+  await query(
+    `INSERT INTO code_symbols (
+      workspace_id, repository_id, symbol_type, name, full_name, language,
+      file_path, start_line, end_line, parent_name, parent_full_name, metadata
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+    [
+      workspaceId,
+      repositoryId,
+      symbol.type,
+      symbol.name,
+      symbol.fullName,
+      symbol.language,
+      symbol.filePath,
+      symbol.line,
+      symbol.endLine || symbol.line,
+      symbol.parentName || null,
+      symbol.parentFullName || null,
+      { indexed_by: "admin-ui", ...(symbol.metadata || {}) }
+    ]
+  );
+}
+
+async function insertCodeRelationship(workspaceId, repositoryId, relationship) {
+  await query(
+    `INSERT INTO code_relationships (
+      workspace_id, repository_id, relationship_type, source_name, target_name,
+      source_file_path, target_file_path, language, start_line, metadata
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+    [
+      workspaceId,
+      repositoryId,
+      relationship.type,
+      relationship.sourceName,
+      relationship.targetName,
+      relationship.sourceFilePath,
+      relationship.targetFilePath || null,
+      relationship.language,
+      relationship.line,
+      relationship.metadata || {}
+    ]
+  );
+}
+
 async function collectIndexableFiles(rootPath) {
   const root = path.resolve(rootPath);
   const files = [];
+  const ignored = [];
   const stats = {
     totalFiles: 0,
     skippedFiles: 0
@@ -1069,20 +1713,33 @@ async function collectIndexableFiles(rootPath) {
       stats.totalFiles += 1;
 
       const stat = await fs.stat(absolutePath);
+      const relativePath = path.relative(root, absolutePath);
       if (stat.size > maxIndexFileBytes) {
         stats.skippedFiles += 1;
+        ignored.push({
+          absolutePath,
+          relativePath,
+          size: stat.size,
+          reason: "file_too_large"
+        });
         continue;
       }
 
       const language = await inferFileLanguage(absolutePath, entry.name);
       if (!language) {
         stats.skippedFiles += 1;
+        ignored.push({
+          absolutePath,
+          relativePath,
+          size: stat.size,
+          reason: "unsupported_or_binary"
+        });
         continue;
       }
 
       files.push({
         absolutePath,
-        relativePath: path.relative(root, absolutePath),
+        relativePath,
         language,
         size: stat.size
       });
@@ -1090,7 +1747,7 @@ async function collectIndexableFiles(rootPath) {
   }
 
   await visit(root);
-  return { files, stats };
+  return { files, ignored, stats };
 }
 
 async function inferFileLanguage(absolutePath, fileName) {
@@ -1148,7 +1805,15 @@ async function looksLikeTextFile(absolutePath) {
   }
 }
 
-function chunkContent(content) {
+function chunkContent(content, file, symbols = []) {
+  const structuralChunks = chunkContentBySymbols(content, file, symbols);
+  if (structuralChunks.length) {
+    return structuralChunks;
+  }
+  return chunkContentByLines(content, file);
+}
+
+function chunkContentByLines(content, file, baseMetadata = {}) {
   const lines = content.split(/\r?\n/);
   const chunks = [];
   let index = 0;
@@ -1162,7 +1827,12 @@ function chunkContent(content) {
         index,
         startLine: start + 1,
         endLine: end,
-        content: chunkText
+        content: chunkText,
+        file,
+        metadata: {
+          chunk_type: "line_window",
+          ...baseMetadata
+        }
       });
       index += 1;
     }
@@ -1174,22 +1844,124 @@ function chunkContent(content) {
   return chunks;
 }
 
+function chunkContentBySymbols(content, file, symbols) {
+  const lines = content.split(/\r?\n/);
+  const chunkableSymbols = symbols
+    .filter((symbol) => symbol.filePath === file.relativePath)
+    .filter((symbol) => ["class", "interface", "type", "enum", "function", "method", "constructor", "property", "struct", "record", "protocol", "actor", "extension", "mixin", "table", "view", "procedure", "trigger", "message", "service", "rpc", "oneof"].includes(symbol.type))
+    .filter((symbol) => Number(symbol.line || 0) > 0)
+    .map((symbol) => ({
+      ...symbol,
+      endLine: Math.min(lines.length, Math.max(Number(symbol.endLine || symbol.line || 1), Number(symbol.line || 1)))
+    }))
+    .sort((a, b) => a.line - b.line || b.endLine - a.endLine);
+
+  if (!chunkableSymbols.length) {
+    return [];
+  }
+
+  const chunks = [];
+  let index = 0;
+  const seenRanges = new Set();
+  const firstSymbolLine = chunkableSymbols[0]?.line || 1;
+  if (firstSymbolLine > 1) {
+    const preamble = lines.slice(0, firstSymbolLine - 1).join("\n").trim();
+    if (preamble) {
+      chunks.push({
+        index,
+        startLine: 1,
+        endLine: firstSymbolLine - 1,
+        content: preamble,
+        file,
+        metadata: { chunk_type: "file_preamble" }
+      });
+      index += 1;
+    }
+  }
+  for (let symbolIndex = 0; symbolIndex < chunkableSymbols.length; symbolIndex += 1) {
+    const symbol = chunkableSymbols[symbolIndex];
+    const rangeKey = `${symbol.line}:${symbol.endLine}:${symbol.name}`;
+    if (seenRanges.has(rangeKey)) {
+      continue;
+    }
+    seenRanges.add(rangeKey);
+
+    const parentService = chunkableSymbols.find((candidate) => candidate.type === "service" && candidate.line < symbol.line && candidate.endLine >= symbol.endLine);
+    if (symbol.type === "rpc" && parentService) {
+      continue;
+    }
+
+    const segmentLines = lines.slice(symbol.line - 1, symbol.endLine);
+    const maxSymbolLines = Math.max(chunkLineSize, Math.floor(chunkLineSize * 1.5));
+    if (segmentLines.length > maxSymbolLines) {
+      for (const chunk of chunkContentByLines(segmentLines.join("\n"), file, symbolChunkMetadata(symbol))) {
+        chunks.push({
+          ...chunk,
+          index,
+          startLine: symbol.line + chunk.startLine - 1,
+          endLine: symbol.line + chunk.endLine - 1
+        });
+        index += 1;
+      }
+      continue;
+    }
+
+    const contentText = segmentLines.join("\n").trim();
+    if (!contentText) {
+      continue;
+    }
+    chunks.push({
+      index,
+      startLine: symbol.line,
+      endLine: symbol.endLine,
+      content: contentText,
+      file,
+      metadata: symbolChunkMetadata(symbol)
+    });
+    index += 1;
+  }
+
+  return chunks;
+}
+
+function symbolChunkMetadata(symbol) {
+  return {
+    chunk_type: "symbol",
+    symbol_name: symbol.name,
+    symbol_full_name: symbol.fullName,
+    symbol_type: symbol.type,
+    parent_name: symbol.parentName || null,
+    parent_full_name: symbol.parentFullName || null
+  };
+}
+
 async function analyzeCodeFile(content, file, signal) {
   if (file.language === "csharp" && roslynIndexerUrl) {
     try {
-      return normalizeAnalysis(await analyzeCsharpWithRoslyn(content, file, signal));
+      const analysis = await analyzeCsharpWithRoslyn(content, file, signal);
+      analysis.relationships = [
+        ...(analysis.relationships || []),
+        ...extractPackageManifestRelationships(content, file, analysis.symbols || [])
+      ];
+      return normalizeAnalysis(analysis, content);
     } catch (error) {
       console.warn("roslyn indexer unavailable, falling back to local csharp analyzer", error);
     }
   }
 
   const analyzer = languageAnalyzers[file.language] || analyzeGenericTree;
-  return normalizeAnalysis(analyzer(content, file));
+  const analysis = analyzer(content, file);
+  analysis.relationships = [
+    ...(analysis.relationships || []),
+    ...extractPackageManifestRelationships(content, file, analysis.symbols || [])
+  ];
+  return normalizeAnalysis(analysis, content);
 }
 
-function normalizeAnalysis(analysis) {
+function normalizeAnalysis(analysis, content = "") {
+  const symbols = enrichSymbolHierarchy(inferSymbolRanges(content, dedupeSymbols(analysis.symbols || [])));
   return {
-    symbols: dedupeSymbols(analysis.symbols || []),
+    symbols,
     relationships: dedupeRelationships(analysis.relationships || [])
   };
 }
@@ -1215,6 +1987,9 @@ async function analyzeCsharpWithRoslyn(content, file, signal) {
     symbols: (body.symbols || []).map((symbol) => createSymbol(file, symbol.type, symbol.name, symbol.line || 1, {
       indexer: "roslyn",
       full_name: symbol.full_name,
+      end_line: symbol.end_line,
+      parent_name: symbol.parent_name,
+      parent_full_name: symbol.parent_full_name,
       ...(symbol.metadata || {})
     })),
     relationships: (body.relationships || []).map((relationship) => createRelationship(file, relationship.type, relationship.target_name, relationship.line || 1, {
@@ -1243,21 +2018,29 @@ function analyzePatternLanguage(content, file, symbolPatterns, relationshipExtra
     }
   });
 
+  const rangedSymbols = inferSymbolRanges(content, symbols);
   for (const extractor of relationshipExtractors) {
-    relationships.push(...extractor(content, file, symbols));
+    relationships.push(...extractor(content, file, rangedSymbols));
   }
 
-  return { symbols, relationships };
+  return { symbols: rangedSymbols, relationships };
 }
 
 function createSymbol(file, type, name, line, metadata = {}) {
+  const fullName = metadata.full_name || metadata.fullName || `${file.relativePath}#${name}`;
+  const parentName = metadata.parent_name || metadata.parentName || null;
+  const parentFullName = metadata.parent_full_name || metadata.parentFullName || null;
+  const endLine = Number(metadata.end_line || metadata.endLine || line || 1);
   return {
     type,
     name,
-    fullName: `${file.relativePath}#${name}`,
+    fullName,
     language: file.language,
     filePath: file.relativePath,
     line,
+    endLine,
+    parentName,
+    parentFullName,
     metadata: {
       indexer: indexerKindForLanguage(file.language),
       ...metadata
@@ -1284,7 +2067,9 @@ function createRelationship(file, type, targetName, line, metadata = {}, symbols
 function relationshipSourceFor(symbols, line) {
   let current = null;
   for (const symbol of symbols) {
-    if (symbol.line <= line && (!current || symbol.line > current.line)) {
+    const startsBefore = Number(symbol.line || 0) <= line;
+    const endsAfter = !symbol.endLine || Number(symbol.endLine) >= line;
+    if (startsBefore && endsAfter && (!current || symbol.line > current.line)) {
       current = symbol;
     }
   }
@@ -1315,11 +2100,111 @@ function dedupeRelationships(relationships) {
   });
 }
 
+function inferSymbolRanges(content, symbols) {
+  if (!content || !symbols.length) {
+    return symbols;
+  }
+
+  const lines = content.split(/\r?\n/);
+  const braceLanguages = new Set(["csharp", "javascript", "typescript", "swift", "dart", "css", "protobuf"]);
+  return symbols.map((symbol) => {
+    if (symbol.endLine && symbol.endLine > symbol.line) {
+      return symbol;
+    }
+
+    let endLine = symbol.line;
+    if (braceLanguages.has(symbol.language)) {
+      endLine = inferBraceRange(lines, symbol.line);
+    } else if (["json", "yaml", "sql", "html"].includes(symbol.language)) {
+      endLine = inferIndentRange(lines, symbol.line);
+    }
+
+    return { ...symbol, endLine: Math.max(symbol.line, endLine) };
+  });
+}
+
+function inferBraceRange(lines, startLine) {
+  let depth = 0;
+  let foundOpeningBrace = false;
+
+  for (let lineIndex = Math.max(0, startLine - 1); lineIndex < lines.length; lineIndex += 1) {
+    const stripped = stripStringLiterals(lines[lineIndex]);
+    for (const char of stripped) {
+      if (char === "{") {
+        depth += 1;
+        foundOpeningBrace = true;
+      } else if (char === "}" && foundOpeningBrace) {
+        depth -= 1;
+        if (depth <= 0) {
+          return lineIndex + 1;
+        }
+      }
+    }
+    if (!foundOpeningBrace && lineIndex - startLine > 4) {
+      break;
+    }
+  }
+
+  return startLine;
+}
+
+function inferIndentRange(lines, startLine) {
+  const startIndex = Math.max(0, startLine - 1);
+  const startIndent = leadingWhitespace(lines[startIndex] || "");
+  for (let index = startIndex + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line.trim()) {
+      continue;
+    }
+    if (leadingWhitespace(line) <= startIndent) {
+      return Math.max(startLine, index);
+    }
+  }
+  return lines.length;
+}
+
+function enrichSymbolHierarchy(symbols) {
+  const containerTypes = new Set(["namespace", "class", "interface", "record", "struct", "enum", "protocol", "actor", "extension", "mixin", "type", "message", "service", "oneof", "package"]);
+  const byFile = new Map();
+  for (const symbol of symbols) {
+    const items = byFile.get(symbol.filePath) || [];
+    items.push(symbol);
+    byFile.set(symbol.filePath, items);
+  }
+
+  const enriched = [];
+  for (const fileSymbols of byFile.values()) {
+    const sorted = fileSymbols.sort((a, b) => a.line - b.line || (b.endLine || b.line) - (a.endLine || a.line));
+    for (const symbol of sorted) {
+      const parent = sorted
+        .filter((candidate) => candidate !== symbol)
+        .filter((candidate) => containerTypes.has(candidate.type))
+        .filter((candidate) => candidate.line <= symbol.line && Number(candidate.endLine || candidate.line) >= Number(symbol.endLine || symbol.line))
+        .sort((a, b) => b.line - a.line || (a.endLine || a.line) - (b.endLine || b.line))[0];
+      enriched.push({
+        ...symbol,
+        parentName: symbol.parentName || parent?.name || null,
+        parentFullName: symbol.parentFullName || parent?.fullName || null
+      });
+    }
+  }
+
+  return enriched;
+}
+
+function stripStringLiterals(value) {
+  return String(value || "").replace(/(["'`]).*?\1/g, "");
+}
+
+function leadingWhitespace(value) {
+  return String(value || "").match(/^\s*/)?.[0].length || 0;
+}
+
 function indexerKindForLanguage(language) {
   if (language === "csharp") {
     return "roslyn-fallback";
   }
-  if (["javascript", "typescript", "html", "css", "swift", "dart", "json", "yaml", "sql"].includes(language)) {
+  if (["javascript", "typescript", "html", "css", "swift", "dart", "json", "yaml", "sql", "protobuf"].includes(language)) {
     return `${language}-language-indexer`;
   }
   return "generic-tree-indexer";
@@ -1335,7 +2220,8 @@ const languageAnalyzers = {
   dart: analyzeDart,
   json: analyzeJson,
   yaml: analyzeYaml,
-  sql: analyzeSql
+  sql: analyzeSql,
+  protobuf: analyzeProtobuf
 };
 
 const ignoredSymbolNames = new Set([
@@ -1351,6 +2237,24 @@ const ignoredSymbolNames = new Set([
   "try",
   "finally",
   "guard"
+]);
+
+const protobufScalarTypes = new Set([
+  "double",
+  "float",
+  "int32",
+  "int64",
+  "uint32",
+  "uint64",
+  "sint32",
+  "sint64",
+  "fixed32",
+  "fixed64",
+  "sfixed32",
+  "sfixed64",
+  "bool",
+  "string",
+  "bytes"
 ]);
 
 function analyzeCsharp(content, file) {
@@ -1512,6 +2416,143 @@ function analyzeSql(content, file) {
   return { symbols, relationships };
 }
 
+function analyzeProtobuf(content, file) {
+  const lines = content.split(/\r?\n/);
+  const symbols = [];
+  const relationships = [];
+  const stack = [];
+  let packageName = "";
+  let braceDepth = 0;
+
+  lines.forEach((rawLine, index) => {
+    while (stack.length && braceDepth <= stack.at(-1).closeDepth) {
+      stack.pop();
+    }
+
+    const line = stripProtobufLineComment(rawLine);
+    const trimmed = line.trim();
+    const lineNumber = index + 1;
+    if (!trimmed) {
+      return;
+    }
+
+    const packageMatch = trimmed.match(/^package\s+([A-Za-z_][\w.]*)\s*;/);
+    if (packageMatch) {
+      packageName = packageMatch[1];
+      symbols.push(createSymbol(file, "package", packageName, lineNumber, {
+        full_name: packageName,
+        proto_kind: "package"
+      }));
+    }
+
+    const importMatch = trimmed.match(/^import\s+(?:(?:public|weak)\s+)?["']([^"']+\.proto)["']\s*;/);
+    if (importMatch) {
+      relationships.push(createRelationship(file, "IMPORTS", importMatch[1], lineNumber, {
+        syntax: "proto-import",
+        targetFilePath: importMatch[1]
+      }, symbols));
+    }
+
+    const containerMatch = trimmed.match(/^(message|service|enum|oneof)\s+([A-Za-z_]\w*)\b/);
+    if (containerMatch) {
+      const type = containerMatch[1];
+      const name = containerMatch[2];
+      const fullName = protobufFullName(packageName, stack, name);
+      symbols.push(createSymbol(file, type, name, lineNumber, {
+        full_name: fullName,
+        proto_kind: type,
+        parent_name: stack.at(-1)?.name || null,
+        parent_full_name: stack.at(-1)?.fullName || null
+      }));
+      if (trimmed.includes("{")) {
+        stack.push({ type, name, fullName, closeDepth: braceDepth });
+      }
+    }
+
+    const rpcMatch = trimmed.match(/^rpc\s+([A-Za-z_]\w*)\s*\(\s*(?:stream\s+)?([.\w]+)\s*\)\s+returns\s*\(\s*(?:stream\s+)?([.\w]+)\s*\)/);
+    if (rpcMatch) {
+      const name = rpcMatch[1];
+      const requestType = normalizeProtoTypeName(rpcMatch[2]);
+      const responseType = normalizeProtoTypeName(rpcMatch[3]);
+      const fullName = protobufFullName(packageName, stack, name);
+      symbols.push(createSymbol(file, "rpc", name, lineNumber, {
+        full_name: fullName,
+        proto_kind: "rpc",
+        parent_name: stack.at(-1)?.name || null,
+        parent_full_name: stack.at(-1)?.fullName || null,
+        request_type: requestType,
+        response_type: responseType
+      }));
+      for (const [role, target] of [["request", requestType], ["response", responseType]]) {
+        if (target) {
+          relationships.push(createRelationship(file, "REFERENCES", target, lineNumber, {
+            syntax: "rpc-type",
+            role,
+            rpc: name
+          }, symbols));
+        }
+      }
+    }
+
+    const field = protobufField(trimmed);
+    if (field) {
+      for (const target of field.types) {
+        if (!protobufScalarTypes.has(target)) {
+          relationships.push(createRelationship(file, "REFERENCES", target, lineNumber, {
+            syntax: "field-type",
+            field: field.name
+          }, symbols));
+        }
+      }
+    }
+
+    const braceLine = stripStringLiterals(line);
+    braceDepth += (braceLine.match(/{/g) || []).length;
+    braceDepth -= (braceLine.match(/}/g) || []).length;
+    while (stack.length && braceDepth <= stack.at(-1).closeDepth) {
+      stack.pop();
+    }
+  });
+
+  return { symbols, relationships };
+}
+
+function protobufFullName(packageName, stack, name) {
+  return [...(packageName ? [packageName] : []), ...stack.map((item) => item.name), name].join(".");
+}
+
+function stripProtobufLineComment(line) {
+  return String(line || "").replace(/\/\/.*$/, "");
+}
+
+function normalizeProtoTypeName(value) {
+  return String(value || "").trim().replace(/^stream\s+/, "").replace(/^\./, "");
+}
+
+function protobufField(line) {
+  if (/^(reserved|option|extensions|extend|rpc|message|service|enum|oneof|package|import)\b/.test(line)) {
+    return null;
+  }
+
+  const mapMatch = line.match(/^(?:optional|required|repeated)?\s*map\s*<\s*([.\w]+)\s*,\s*([.\w]+)\s*>\s+([A-Za-z_]\w*)\s*=\s*\d+/);
+  if (mapMatch) {
+    return {
+      name: mapMatch[3],
+      types: [normalizeProtoTypeName(mapMatch[1]), normalizeProtoTypeName(mapMatch[2])].filter(Boolean)
+    };
+  }
+
+  const fieldMatch = line.match(/^(?:optional|required|repeated)?\s*([.\w]+)\s+([A-Za-z_]\w*)\s*=\s*\d+/);
+  if (!fieldMatch) {
+    return null;
+  }
+
+  return {
+    name: fieldMatch[2],
+    types: [normalizeProtoTypeName(fieldMatch[1])].filter(Boolean)
+  };
+}
+
 function analyzeGenericTree(content, file) {
   const lines = content.split(/\r?\n/);
   const symbols = [];
@@ -1606,6 +2647,105 @@ function extractDartRelationships(content, file, symbols) {
   return relationships;
 }
 
+function extractPackageManifestRelationships(content, file, symbols = []) {
+  const baseName = path.basename(file.relativePath).toLowerCase();
+  const relationships = [];
+
+  if (["package.json", "package-lock.json"].includes(baseName)) {
+    try {
+      const parsed = JSON.parse(content);
+      const sections = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"];
+      const packages = baseName === "package-lock.json" && parsed.packages ? parsed.packages[""] || {} : parsed;
+      for (const section of sections) {
+        for (const dependency of Object.keys(packages[section] || {})) {
+          relationships.push(createRelationship(file, "DEPENDS_ON", dependency, 1, { manifest: baseName, section }, symbols));
+        }
+      }
+    } catch {
+      // Keep normal file indexing even when a lockfile is partially written.
+    }
+  }
+
+  if (["pubspec.yaml", "pubspec.yml"].includes(baseName)) {
+    relationships.push(...extractYamlDependencySections(content, file, symbols, ["dependencies", "dev_dependencies", "dependency_overrides"], baseName));
+  }
+
+  if (["pnpm-lock.yaml", "pnpm-lock.yml", "yarn.lock", "pubspec.lock"].includes(baseName)) {
+    relationships.push(...extractLockfileDependencyNames(content, file, symbols, baseName));
+  }
+
+  if (["packages.config", "directory.packages.props"].includes(baseName) || file.relativePath.toLowerCase().endsWith(".csproj")) {
+    for (const match of content.matchAll(/<PackageReference\b[^>]*\bInclude=["']([^"']+)["'][^>]*>/gi)) {
+      relationships.push(createRelationship(file, "DEPENDS_ON", match[1], lineForOffset(content, match.index || 0), { manifest: baseName || "csproj", syntax: "PackageReference" }, symbols));
+    }
+    for (const match of content.matchAll(/<package\b[^>]*\bid=["']([^"']+)["'][^>]*>/gi)) {
+      relationships.push(createRelationship(file, "DEPENDS_ON", match[1], lineForOffset(content, match.index || 0), { manifest: baseName, syntax: "packages.config" }, symbols));
+    }
+  }
+
+  if (baseName === "package.swift") {
+    for (const match of content.matchAll(/\.package\s*\([^)]*?(?:url|path):\s*"([^"]+)"/gs)) {
+      relationships.push(createRelationship(file, "DEPENDS_ON", normalizeDependencyName(match[1]), lineForOffset(content, match.index || 0), { manifest: baseName, syntax: "swift-package" }, symbols));
+    }
+  }
+
+  if (baseName === "podfile") {
+    for (const match of content.matchAll(/^\s*pod\s+['"]([^'"]+)['"]/gim)) {
+      relationships.push(createRelationship(file, "DEPENDS_ON", match[1], lineForOffset(content, match.index || 0), { manifest: baseName, syntax: "cocoapods" }, symbols));
+    }
+  }
+
+  return relationships;
+}
+
+function extractYamlDependencySections(content, file, symbols, sections, manifest) {
+  const relationships = [];
+  const lines = content.split(/\r?\n/);
+  let currentSection = null;
+  let sectionIndent = 0;
+  lines.forEach((line, index) => {
+    const sectionMatch = line.match(/^(\s*)([A-Za-z_][\w-]*):\s*$/);
+    if (sectionMatch && sections.includes(sectionMatch[2])) {
+      currentSection = sectionMatch[2];
+      sectionIndent = sectionMatch[1].length;
+      return;
+    }
+    if (!currentSection) {
+      return;
+    }
+    if (line.trim() && leadingWhitespace(line) <= sectionIndent) {
+      currentSection = null;
+      return;
+    }
+    const dependencyMatch = line.match(/^\s{2,}([A-Za-z0-9_.-]+):/);
+    if (dependencyMatch) {
+      relationships.push(createRelationship(file, "DEPENDS_ON", dependencyMatch[1], index + 1, { manifest, section: currentSection }, symbols));
+    }
+  });
+  return relationships;
+}
+
+function extractLockfileDependencyNames(content, file, symbols, manifest) {
+  const relationships = [];
+  content.split(/\r?\n/).forEach((line, index) => {
+    const match = line.match(/^\s{0,4}(?:["']?\/?([@A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?)@|([A-Za-z0-9_.-]+):)/);
+    const dependency = match?.[1] || match?.[2];
+    if (dependency && !["packages", "dependencies", "dev_dependencies", "sdks"].includes(dependency)) {
+      relationships.push(createRelationship(file, "DEPENDS_ON", dependency, index + 1, { manifest, syntax: "lockfile" }, symbols));
+    }
+  });
+  return relationships;
+}
+
+function normalizeDependencyName(value) {
+  const text = String(value || "").replace(/\.git$/, "");
+  return text.split(/[/:]/).filter(Boolean).pop() || text;
+}
+
+function lineForOffset(content, offset) {
+  return content.slice(0, offset).split(/\r?\n/).length;
+}
+
 function extractCallRelationships(content, file, symbols) {
   const keywords = new Set([
     "if", "for", "while", "switch", "catch", "return", "throw", "new", "typeof",
@@ -1645,8 +2785,10 @@ function buildChunkEmbeddingText(chunk) {
     `Repository file: ${chunk.file.relativePath}`,
     `Language: ${chunk.file.language}`,
     `Lines: ${chunk.startLine}-${chunk.endLine}`,
+    chunk.metadata?.symbol_full_name ? `Symbol: ${chunk.metadata.symbol_full_name}` : null,
+    chunk.metadata?.parent_full_name ? `Parent: ${chunk.metadata.parent_full_name}` : null,
     chunk.content
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 async function createEmbedding(text, signal) {
@@ -1736,6 +2878,25 @@ async function deleteQdrantRepositoryPoints(repositoryId) {
   }
 }
 
+async function deleteQdrantFilePoints(repositoryId, filePath) {
+  const response = await fetch(`${qdrantUrl}/collections/${codeCollection}/points/delete?wait=true`, {
+    method: "POST",
+    headers: qdrantHeaders(),
+    body: JSON.stringify({
+      filter: {
+        must: [
+          { key: "repository_id", match: { value: repositoryId } },
+          { key: "file_path", match: { value: filePath } }
+        ]
+      }
+    })
+  });
+
+  if (![200, 404].includes(response.status)) {
+    throw new Error(`qdrant_file_delete_failed_${response.status}: ${await response.text()}`);
+  }
+}
+
 function qdrantHeaders() {
   return {
     "content-type": "application/json",
@@ -1799,7 +2960,8 @@ async function upsertNeo4jRepository(workspace, repository, files, symbols, rela
         MATCH (f:CodeFile {key: $fileKey})
         MERGE (s:CodeSymbol {key: $symbolKey})
         SET s.name = $name, s.type = $type, s.language = $language, s.file_path = $filePath,
-            s.repository_id = $repositoryId, s.workspace_id = $workspaceId, s.line = $line
+            s.repository_id = $repositoryId, s.workspace_id = $workspaceId, s.line = $line,
+            s.end_line = $endLine, s.parent_name = $parentName, s.parent_full_name = $parentFullName
         MERGE (f)-[:DECLARES]->(s)
       `,
       parameters: {
@@ -1811,7 +2973,23 @@ async function upsertNeo4jRepository(workspace, repository, files, symbols, rela
         type: symbol.type,
         language: symbol.language,
         filePath: symbol.filePath,
-        line: symbol.line
+        line: symbol.line,
+        endLine: symbol.endLine || symbol.line,
+        parentName: symbol.parentName || null,
+        parentFullName: symbol.parentFullName || null
+      }
+    })),
+    ...symbols.filter((symbol) => symbol.parentName).map((symbol) => ({
+      statement: `
+        MATCH (child:CodeSymbol {key: $childKey})
+        MATCH (parent:CodeSymbol {repository_id: $repositoryId, file_path: $filePath, name: $parentName})
+        MERGE (parent)-[:CONTAINS_SYMBOL]->(child)
+      `,
+      parameters: {
+        repositoryId: repository.id,
+        childKey: `${repository.id}:${symbol.filePath}:${symbol.name}:${symbol.line}`,
+        filePath: symbol.filePath,
+        parentName: symbol.parentName
       }
     })),
     ...relationships.map((relationship) => ({
@@ -1854,6 +3032,144 @@ async function upsertNeo4jRepository(workspace, repository, files, symbols, rela
   await runNeo4jStatements(statements);
 }
 
+async function linkWorkspaceRelatedSymbols(workspaceId) {
+  if (!neo4jPassword) {
+    return;
+  }
+
+  await runNeo4jStatements([
+    {
+      statement: `
+        MATCH (w:Workspace {id: $workspaceId})-[:CONTAINS]->(:Repository)-[:CONTAINS]->(:CodeFile)-[:DECLARES]->(a:CodeSymbol)
+        MATCH (w)-[:CONTAINS]->(:Repository)-[:CONTAINS]->(:CodeFile)-[:DECLARES]->(b:CodeSymbol)
+        WHERE a.repository_id <> b.repository_id
+          AND a.name = b.name
+          AND elementId(a) < elementId(b)
+        MERGE (a)-[:RELATED_SYMBOL {reason: 'same_name_cross_repository'}]->(b)
+      `,
+      parameters: {
+        workspaceId
+      }
+    }
+  ]);
+}
+
+async function syncResolvedRelationshipsToNeo4j(workspaceId) {
+  if (!neo4jPassword) {
+    return;
+  }
+
+  const result = await query(
+    `SELECT
+       cr.repository_id,
+       cr.relationship_type,
+       cr.target_name,
+       cr.source_file_path,
+       cr.start_line,
+       cr.resolution_status,
+       cr.target_file_path,
+       cr.target_repository_id,
+       source_symbol.file_path AS source_symbol_file_path,
+       source_symbol.name AS source_symbol_name,
+       source_symbol.start_line AS source_symbol_line,
+       target_symbol.repository_id AS target_symbol_repository_id,
+       target_symbol.file_path AS target_symbol_file_path,
+       target_symbol.name AS target_symbol_name,
+       target_symbol.start_line AS target_symbol_line
+     FROM code_relationships cr
+     LEFT JOIN code_symbols source_symbol ON source_symbol.id = cr.source_symbol_id
+     LEFT JOIN code_symbols target_symbol ON target_symbol.id = cr.target_symbol_id
+     WHERE cr.workspace_id = $1
+       AND cr.resolution_status <> 'unresolved'`,
+    [workspaceId]
+  );
+
+  const statements = [
+    {
+      statement: `
+        MATCH (ref:CodeReference {workspace_id: $workspaceId})-[rel:RESOLVES_TO]->()
+        DELETE rel
+      `,
+      parameters: { workspaceId }
+    },
+    {
+      statement: `
+        MATCH (:CodeSymbol {workspace_id: $workspaceId})-[rel:EMITS_REFERENCE]->(:CodeReference)
+        DELETE rel
+      `,
+      parameters: { workspaceId }
+    }
+  ];
+  for (const relationship of result.rows) {
+    const referenceKey = `${relationship.repository_id}:${relationship.source_file_path}:${relationship.relationship_type}:${relationship.target_name}:${relationship.start_line}`;
+
+    if (relationship.source_symbol_name) {
+      statements.push({
+        statement: `
+          MATCH (source:CodeSymbol {key: $sourceKey})
+          MATCH (ref:CodeReference {key: $referenceKey})
+          MERGE (source)-[:EMITS_REFERENCE]->(ref)
+        `,
+        parameters: {
+          sourceKey: `${relationship.repository_id}:${relationship.source_symbol_file_path}:${relationship.source_symbol_name}:${relationship.source_symbol_line}`,
+          referenceKey
+        }
+      });
+    }
+
+    if (relationship.target_symbol_name) {
+      statements.push({
+        statement: `
+          MATCH (ref:CodeReference {key: $referenceKey})
+          MATCH (target:CodeSymbol {key: $targetKey})
+          MERGE (ref)-[:RESOLVES_TO {status: $status}]->(target)
+        `,
+        parameters: {
+          referenceKey,
+          targetKey: `${relationship.target_symbol_repository_id}:${relationship.target_symbol_file_path}:${relationship.target_symbol_name}:${relationship.target_symbol_line}`,
+          status: relationship.resolution_status
+        }
+      });
+      continue;
+    }
+
+    if (relationship.target_file_path && relationship.target_repository_id) {
+      statements.push({
+        statement: `
+          MATCH (ref:CodeReference {key: $referenceKey})
+          MATCH (target:CodeFile {key: $targetKey})
+          MERGE (ref)-[:RESOLVES_TO {status: $status}]->(target)
+        `,
+        parameters: {
+          referenceKey,
+          targetKey: `${relationship.target_repository_id}:${relationship.target_file_path}`,
+          status: relationship.resolution_status
+        }
+      });
+      continue;
+    }
+
+    if (relationship.target_repository_id) {
+      statements.push({
+        statement: `
+          MATCH (ref:CodeReference {key: $referenceKey})
+          MATCH (target:Repository {id: $targetRepositoryId})
+          MERGE (ref)-[:RESOLVES_TO {status: $status}]->(target)
+        `,
+        parameters: {
+          referenceKey,
+          targetRepositoryId: relationship.target_repository_id,
+          status: relationship.resolution_status
+        }
+      });
+    }
+  }
+
+  if (statements.length) {
+    await runNeo4jStatements(statements);
+  }
+}
+
 async function deleteNeo4jRepository(repositoryId) {
   if (!neo4jPassword) {
     return;
@@ -1869,6 +3185,26 @@ async function deleteNeo4jRepository(repositoryId) {
         DETACH DELETE s, ref, f, r
       `,
       parameters: { repositoryId }
+    }
+  ]);
+}
+
+async function deleteNeo4jFile(repositoryId, filePath) {
+  if (!neo4jPassword) {
+    return;
+  }
+
+  await runNeo4jStatements([
+    {
+      statement: `
+        MATCH (f:CodeFile {key: $fileKey})
+        OPTIONAL MATCH (f)-[:DECLARES]->(s:CodeSymbol)
+        OPTIONAL MATCH (f)-[:IMPORTS|CALLS|REFERENCES|DEPENDS_ON]->(ref:CodeReference)
+        DETACH DELETE s, ref, f
+      `,
+      parameters: {
+        fileKey: `${repositoryId}:${filePath}`
+      }
     }
   ]);
 }
@@ -2417,6 +3753,12 @@ async function handleApi(req, res, url) {
   const cancelIndexJobParams = routeMatch(url.pathname, "/api/workspaces/:workspace/index-jobs/:job/cancel");
   if (cancelIndexJobParams && req.method === "POST") {
     sendJson(res, 200, await cancelIndexJob(cancelIndexJobParams.workspace, cancelIndexJobParams.job));
+    return;
+  }
+
+  const repoReportParams = routeMatch(url.pathname, "/api/workspaces/:workspace/repositories/:repository/index-report");
+  if (repoReportParams && req.method === "GET") {
+    sendJson(res, 200, await getRepositoryIndexReport(repoReportParams.workspace, repoReportParams.repository));
     return;
   }
 

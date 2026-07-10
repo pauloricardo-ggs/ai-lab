@@ -128,32 +128,54 @@ async function searchRelationships(tool, workspace, payload, relationshipTypes, 
   const search = String(payload.symbol || payload.name || payload.query || payload.target || payload.source || "").trim();
   const limit = Math.min(Number(payload.limit || 25), 100);
   const params = [workspace.id, relationshipTypes];
-  const filters = ["workspace_id = $1", "relationship_type = ANY($2)"];
+  const filters = ["cr.workspace_id = $1", "cr.relationship_type = ANY($2)"];
 
   if (search) {
     params.push(`%${search}%`);
     const likeParam = `$${params.length}`;
     if (options.targetOnly) {
-      filters.push(`target_name ILIKE ${likeParam}`);
+      filters.push(`cr.target_name ILIKE ${likeParam}`);
     } else if (options.sourceOnly) {
-      filters.push(`(source_name ILIKE ${likeParam} OR source_file_path ILIKE ${likeParam})`);
+      filters.push(`(cr.source_name ILIKE ${likeParam} OR cr.source_file_path ILIKE ${likeParam})`);
     } else {
-      filters.push(`(target_name ILIKE ${likeParam} OR COALESCE(source_name, '') ILIKE ${likeParam} OR source_file_path ILIKE ${likeParam})`);
+      filters.push(`(cr.target_name ILIKE ${likeParam} OR COALESCE(cr.source_name, '') ILIKE ${likeParam} OR cr.source_file_path ILIKE ${likeParam})`);
     }
   }
 
   if (payload.repository_id) {
     params.push(payload.repository_id);
-    filters.push(`repository_id = $${params.length}`);
+    filters.push(`cr.repository_id = $${params.length}`);
   }
 
   params.push(limit);
   const result = await query(
-    `SELECT id, repository_id, relationship_type, source_name, target_name,
-            source_file_path, target_file_path, language, start_line, metadata
-     FROM code_relationships
+    `SELECT
+       cr.id,
+       cr.repository_id,
+       cr.relationship_type,
+       cr.source_name,
+       cr.target_name,
+       cr.source_file_path,
+       cr.target_file_path,
+       cr.language,
+       cr.start_line,
+       cr.resolution_status,
+       cr.resolution_metadata,
+       cr.source_symbol_id,
+       cr.target_symbol_id,
+       cr.target_repository_id,
+       target_repo.name AS target_repository_name,
+       target_symbol.name AS target_symbol_name,
+       target_symbol.full_name AS target_symbol_full_name,
+       target_symbol.symbol_type AS target_symbol_type,
+       target_symbol.file_path AS target_symbol_file_path,
+       target_symbol.start_line AS target_symbol_start_line,
+       cr.metadata
+     FROM code_relationships cr
+     LEFT JOIN repositories target_repo ON target_repo.id = cr.target_repository_id
+     LEFT JOIN code_symbols target_symbol ON target_symbol.id = cr.target_symbol_id
      WHERE ${filters.join(" AND ")}
-     ORDER BY source_file_path ASC, start_line ASC
+     ORDER BY cr.source_file_path ASC, cr.start_line ASC
      LIMIT $${params.length}`,
     params
   );

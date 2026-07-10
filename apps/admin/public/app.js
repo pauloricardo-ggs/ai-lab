@@ -5,6 +5,7 @@ const state = {
   selectedWorkspace: null,
   mcp: { tools: [], base_url: "" },
   remoteRepos: [],
+  indexReport: null,
   indexJobs: {
     running: [],
     history: [],
@@ -46,6 +47,10 @@ const els = {
   repoName: document.querySelector("#repoName"),
   repoUrl: document.querySelector("#repoUrl"),
   repoBranch: document.querySelector("#repoBranch"),
+  qualityReportSection: document.querySelector("#qualityReportSection"),
+  qualityReportTitle: document.querySelector("#qualityReportTitle"),
+  qualityReportSummary: document.querySelector("#qualityReportSummary"),
+  qualityReportBody: document.querySelector("#qualityReportBody"),
   githubOwner: document.querySelector("#githubOwner"),
   loadGithubRepos: document.querySelector("#loadGithubRepos"),
   remoteRepoSelect: document.querySelector("#remoteRepoSelect"),
@@ -254,9 +259,20 @@ function resetIndexJobState() {
   };
 }
 
+function resetIndexReport() {
+  state.indexReport = null;
+  if (els.qualityReportSection) {
+    els.qualityReportSection.classList.add("hidden");
+    els.qualityReportBody.innerHTML = "";
+    els.qualityReportSummary.textContent = "-";
+    els.qualityReportSummary.className = "status-pill muted";
+  }
+}
+
 function showWorkspaceListScreen() {
   state.selectedWorkspace = null;
   resetIndexJobState();
+  resetIndexReport();
   els.adminWorkspaceListScreen.classList.remove("hidden");
   els.workspaceDetailScreen.classList.add("hidden");
   renderWorkspaces();
@@ -313,6 +329,7 @@ function renderRepositories(payload) {
               <td>${escapeHtml(repo.default_branch || "-")}</td>
               <td><code>${escapeHtml(repo.local_path || "-")}</code></td>
               <td>
+                <button class="secondary-button" data-index-report-repo="${repo.id}">Relatorio</button>
                 <button class="secondary-button" data-reindex-repo="${repo.id}" ${indexActive ? "disabled" : ""}>${indexActive ? "Indexando" : "Reindexar"}</button>
                 <button class="danger-button" data-delete-repo="${repo.id}" ${indexActive ? "disabled" : ""}>Remover</button>
               </td>
@@ -321,6 +338,174 @@ function renderRepositories(payload) {
         }).join("")}
       </tbody>
     </table>
+  `;
+}
+
+function renderIndexReport(report) {
+  if (!report || !els.qualityReportSection) {
+    resetIndexReport();
+    return;
+  }
+
+  const summary = report.summary || {};
+  const indexed = Number(summary.indexed || 0);
+  const skipped = Number(summary.skipped || 0);
+  const errors = Number(summary.errors || 0);
+  const total = Number(summary.total || 0);
+  const score = total ? Math.round((indexed / total) * 100) : 0;
+
+  els.qualityReportSection.classList.remove("hidden");
+  els.qualityReportTitle.textContent = `Relatorio: ${report.repository.name}`;
+  els.qualityReportSummary.textContent = `${score}% indexado`;
+  els.qualityReportSummary.className = `status-pill ${errors ? "offline" : skipped ? "warning" : indexed ? "online" : "muted"}`;
+  els.qualityReportBody.innerHTML = `
+    <div class="quality-grid">
+      ${metricCard("Arquivos", total)}
+      ${metricCard("Indexados", indexed)}
+      ${metricCard("Ignorados", skipped)}
+      ${metricCard("Erros", errors)}
+      ${metricCard("Simbolos", sumCounts(report.symbols_by_type))}
+      ${metricCard("Relacoes", sumCounts(report.relationships_by_type))}
+      ${metricCard("Resolvidas", sumCounts((report.relationships_by_resolution || []).filter((row) => row.status !== "unresolved")))}
+      ${metricCard("Nao resolvidas", Number((report.relationships_by_resolution || []).find((row) => row.status === "unresolved")?.count || 0))}
+    </div>
+    <div class="quality-columns">
+      ${languageCoverageTable("Arquivos por linguagem", report.files_by_language)}
+      ${reportTable("Simbolos por linguagem", report.symbols_by_language, "language")}
+      ${reportTable("Simbolos por tipo", report.symbols_by_type, "type")}
+      ${reportTable("Relacoes por tipo", report.relationships_by_type, "type")}
+      ${reportTable("Resolucao de relacoes", report.relationships_by_resolution, "status")}
+      ${relationshipLanguageTable("Relacoes por linguagem", report.relationships_by_language)}
+      ${reportTable("Ignorados por motivo", report.ignored_reasons, "reason")}
+    </div>
+    <div class="quality-issues">
+      <h4>Arquivos ignorados ou com erro</h4>
+      ${renderFileIssues(report.file_issues || [])}
+    </div>
+  `;
+}
+
+function metricCard(label, value) {
+  return `
+    <div>
+      <span>${escapeHtml(label)}</span>
+      <strong>${Number(value || 0)}</strong>
+    </div>
+  `;
+}
+
+function sumCounts(rows = []) {
+  return rows.reduce((sum, row) => sum + Number(row.count || 0), 0);
+}
+
+function reportTable(title, rows = [], labelKey) {
+  return `
+    <div class="quality-table">
+      <h4>${escapeHtml(title)}</h4>
+      ${rows.length ? `
+        <table>
+          <tbody>
+            ${rows.map((row) => `
+              <tr>
+                <td>${escapeHtml(row[labelKey] || "-")}</td>
+                <td><strong>${Number(row.count || 0)}</strong></td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      ` : `<div class="empty-state">Sem dados.</div>`}
+    </div>
+  `;
+}
+
+function languageCoverageTable(title, rows = []) {
+  return `
+    <div class="quality-table">
+      <h4>${escapeHtml(title)}</h4>
+      ${rows.length ? `
+        <table>
+          <thead>
+            <tr>
+              <th>Linguagem</th>
+              <th>Total</th>
+              <th>Ok</th>
+              <th>Skip</th>
+              <th>Erro</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map((row) => `
+              <tr>
+                <td>${escapeHtml(row.language || "-")}</td>
+                <td><strong>${Number(row.total || 0)}</strong></td>
+                <td>${Number(row.indexed || 0)}</td>
+                <td>${Number(row.skipped || 0)}</td>
+                <td>${Number(row.errors || 0)}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      ` : `<div class="empty-state">Sem dados.</div>`}
+    </div>
+  `;
+}
+
+function relationshipLanguageTable(title, rows = []) {
+  return `
+    <div class="quality-table">
+      <h4>${escapeHtml(title)}</h4>
+      ${rows.length ? `
+        <table>
+          <thead>
+            <tr>
+              <th>Linguagem</th>
+              <th>Total</th>
+              <th>Resolvidas</th>
+              <th>Pendentes</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map((row) => `
+              <tr>
+                <td>${escapeHtml(row.language || "-")}</td>
+                <td><strong>${Number(row.total || 0)}</strong></td>
+                <td>${Number(row.resolved || 0)}</td>
+                <td>${Number(row.unresolved || 0)}</td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      ` : `<div class="empty-state">Sem dados.</div>`}
+    </div>
+  `;
+}
+
+function renderFileIssues(issues) {
+  if (!issues.length) {
+    return `<div class="empty-state">Nenhum arquivo ignorado ou com erro registrado.</div>`;
+  }
+
+  return `
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Arquivo</th>
+            <th>Status</th>
+            <th>Motivo/erro</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${issues.map((issue) => `
+            <tr>
+              <td><code>${escapeHtml(issue.file_path)}</code><br><span class="muted-text">${escapeHtml(issue.language || "-")}</span></td>
+              <td><span class="status-pill ${issue.status === "error" ? "offline" : "warning"}">${escapeHtml(issue.status)}</span></td>
+              <td>${escapeHtml(issue.error || issue.skipped_reason || "-")}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
   `;
 }
 
@@ -594,6 +779,7 @@ async function selectWorkspace(slug) {
 
   if (state.selectedWorkspace?.slug !== slug) {
     state.indexJobs.page = 1;
+    resetIndexReport();
   }
   state.selectedWorkspace = workspace;
   showWorkspaceDetailScreen();
@@ -661,6 +847,24 @@ document.addEventListener("click", async (event) => {
     if (Number.isFinite(page) && page >= 1 && page <= state.indexJobs.totalPages) {
       state.indexJobs.page = page;
       await loadIndexJobs(state.selectedWorkspace.slug);
+    }
+    return;
+  }
+
+  const indexReportButton = event.target.closest("[data-index-report-repo]");
+  if (indexReportButton && state.selectedWorkspace) {
+    try {
+      indexReportButton.disabled = true;
+      indexReportButton.textContent = "Carregando";
+      const report = await api(`/api/workspaces/${encodeURIComponent(state.selectedWorkspace.slug)}/repositories/${encodeURIComponent(indexReportButton.dataset.indexReportRepo)}/index-report`);
+      state.indexReport = report;
+      renderIndexReport(report);
+      els.qualityReportSection.scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      indexReportButton.disabled = false;
+      indexReportButton.textContent = "Relatorio";
     }
     return;
   }

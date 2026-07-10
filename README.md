@@ -172,6 +172,7 @@ A Admin UI e o portal operacional da plataforma. Ela oferece:
 - indexacao automatica de codigo por workspace apos o clone
 - acompanhamento em tempo real do progresso de indexacao do workspace e historico paginado
 - bloqueio de reindexacao concorrente no mesmo repositorio e cancelamento de jobs ativos
+- relatorio de qualidade por repositorio com arquivos indexados, ignorados, erros, simbolos e relacoes
 - remocao do registro e da pasta clonada do repositorio
 
 Para listar repositorios GitHub pela interface, configure `GITHUB_TOKEN` no `.env`. Para restringir a uma organizacao/owner por padrao, configure `GITHUB_OWNER`.
@@ -240,16 +241,18 @@ Ao adicionar um repositorio pela Admin UI, a plataforma inicia a indexacao em ba
 
 1. clona o repositorio em `data/repos/<workspace_slug>/<repository>`
 2. escaneia arquivos de codigo/texto suportados, incluindo Swift/Xcode
-3. divide o conteudo em chunks
-4. gera embeddings locais com Ollama usando `EMBEDDING_MODEL`
-5. grava chunks em `code_chunks`
-6. grava simbolos simples em `code_symbols`
-7. grava relacoes tecnicas em `code_relationships`
-8. salva vetores no Qdrant na collection `code_symbols`
-9. cria nos e relacionamentos no Neo4j sob o no `Workspace`
-10. marca o repositorio como `indexed` ao concluir
+3. extrai simbolos e relacoes por linguagem
+4. divide o conteudo em chunks estruturais por simbolo quando possivel
+5. gera embeddings locais com Ollama usando `EMBEDDING_MODEL`
+6. grava chunks em `code_chunks`
+7. grava simbolos em `code_symbols`, incluindo hierarquia quando conhecida
+8. grava relacoes tecnicas em `code_relationships`
+9. resolve relacoes para arquivos, simbolos ou repositorios reais do workspace
+10. salva vetores no Qdrant na collection `code_symbols`
+11. cria nos e relacionamentos no Neo4j sob o no `Workspace`
+12. marca o repositorio como `indexed` ao concluir
 
-O repositorio e a unidade de ingestao, mas o escopo do indice e do grafo e sempre o workspace. Isso permite consultar e relacionar repositorios diferentes dentro do mesmo workspace. O grafo usa `Workspace -> Repository -> CodeFile -> CodeSymbol` e cria relacoes `RELATED_SYMBOL` entre simbolos de mesmo nome em repositorios diferentes do workspace.
+O repositorio e a unidade de ingestao, mas o escopo do indice e do grafo e sempre o workspace. Isso permite consultar e relacionar repositorios diferentes dentro do mesmo workspace. O grafo usa `Workspace -> Repository -> CodeFile -> CodeSymbol`, cria hierarquia local com `CONTAINS_SYMBOL`, relaciona referencias resolvidas com `RESOLVES_TO` e cria `RELATED_SYMBOL` entre simbolos de mesmo nome em repositorios diferentes do workspace.
 
 Linguagens com indexacao especifica:
 
@@ -261,14 +264,21 @@ Linguagens com indexacao especifica:
 - JSON
 - YAML
 - SQL
+- Protobuf (`.proto`)
 
-Outros arquivos textuais continuam sendo indexados pelo indexador generico.
+Outros arquivos textuais continuam sendo indexados pelo indexador generico. Manifestos como `package.json`, `package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`, `pubspec.yaml`, `.csproj`, `Directory.Packages.props`, `packages.config`, `Package.swift` e `Podfile` geram relacoes `DEPENDS_ON`.
+
+A reindexacao e incremental. A plataforma mantem inventario em `code_index_files`, compara hash por arquivo, reprocessa apenas arquivos novos/alterados, remove arquivos deletados do indice, preserva arquivos inalterados e re-resolve relacoes do workspace. O relatorio de qualidade do repositorio usa esse inventario para mostrar arquivos por linguagem, ignorados por motivo, erros por arquivo, simbolos por linguagem/tipo, relacoes por tipo e status de resolucao.
 
 Enquanto a indexacao esta rodando, o status fica `indexing`. A Admin UI mostra o job do workspace em tempo real, incluindo fase atual, arquivo em processamento, total de arquivos do repositorio, arquivos indexaveis, arquivos ignorados, chunks processados e erros. Se houver falha, fica `index_error` e o repositorio pode ser reindexado pelo botao `Reindexar` na Admin UI.
 
 A plataforma nao permite iniciar outra reindexacao para um repositorio que ja tenha job ativo. Jobs em execucao podem ser cancelados na tela do workspace; ao cancelar, o job fica `canceled` e o repositorio fica `index_canceled`.
 
-As tools `code.search_code`, `code.semantic_search_code`, `code.search_symbol`, `code.get_class`, `code.get_method` e `code.find_references` ja consultam os dados indexados por workspace.
+As tools `code.search_code`, `code.semantic_search_code`, `code.search_symbol`, `code.get_class`, `code.get_method`, `code.find_references`, `code.find_callers`, `code.find_callees` e `code.find_dependencies` ja consultam os dados indexados por workspace. As tools de relacao retornam tambem o alvo resolvido quando houver simbolo, arquivo ou repositorio correspondente.
+
+## Roadmap
+
+O roadmap de continuidade esta em `docs/roadmap.md`. Ele descreve o que ja foi implementado, lacunas conhecidas, proximas fases e criterios de aceite para outros agentes continuarem a implementacao.
 
 ## Seguranca
 
