@@ -283,9 +283,8 @@ Implementado:
 
 Implementado:
 
-- `GET /health`
-- `GET /tools`
-- `POST /tools/:tool`
+- endpoint MCP Streamable HTTP em `/mcp`
+- `initialize`, `tools/list` e `tools/call` via JSON-RPC MCP
 - Validacao de API key quando configurada.
 - Exigencia de workspace nas chamadas.
 - Roteamento para Knowledge MCP, Code MCP e Git MCP.

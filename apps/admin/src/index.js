@@ -26,6 +26,13 @@ const neo4jUrl = process.env.NEO4J_HTTP_URL || "http://neo4j:7474";
 const neo4jPassword = process.env.NEO4J_PASSWORD || "";
 const roslynIndexerUrl = process.env.ROSLYN_INDEXER_URL || "";
 const codeCollection = "code_symbols";
+const mcpToolNames = [
+  "code.search_symbol", "code.get_class", "code.get_method", "code.find_references", "code.find_callers", "code.find_callees",
+  "code.find_dependencies", "code.explain_architecture", "code.find_related_documents", "code.search_code", "code.semantic_search_code",
+  "knowledge.search_documents", "knowledge.list_documents", "knowledge.get_document", "knowledge.search_business_rules", "knowledge.search_embeddings",
+  "git.get_history", "git.get_diff", "git.get_commit", "git.get_branch", "git.get_pull_request", "git.list_changed_files",
+  "git.find_commits_touching_symbol", "git.search_commit_message"
+].sort();
 
 const ignoredDirectories = new Set([
   ".git",
@@ -206,8 +213,7 @@ const serviceDefinitions = [
     name: "MCP Gateway",
     kind: "api",
     description: "API para agentes e ferramentas MCP, com roteamento por workspace.",
-    healthUrl: "http://gateway:7000/health",
-    toolsUrl: "http://gateway:7000/tools",
+    healthUrl: null,
     publicPortEnv: "MCP_GATEWAY_PORT",
     path: "/services/mcp-gateway"
   }
@@ -401,26 +407,10 @@ async function listContainers() {
   }
 }
 
-async function listGatewayTools(req) {
+async function mcpGatewayInfo(req) {
   const service = serviceDefinitions.find((item) => item.id === "mcp-gateway");
-  const baseUrl = publicUrl(req, service).replace(/\/services\/mcp-gateway$/, "");
-
-  try {
-    const response = await fetch(service.toolsUrl, { signal: AbortSignal.timeout(2500) });
-    const body = await response.json();
-    return {
-      base_url: baseUrl,
-      gateway_api_key_configured: Boolean(gatewayApiKey),
-      tools: body.tools || []
-    };
-  } catch (error) {
-    return {
-      base_url: baseUrl,
-      gateway_api_key_configured: Boolean(gatewayApiKey),
-      tools: [],
-      error: error instanceof Error ? error.message : "tools_unavailable"
-    };
-  }
+  const baseUrl = `${publicUrl(req, service).replace(/\/services\/mcp-gateway$/, "")}/mcp`;
+  return { base_url: baseUrl, gateway_api_key_configured: Boolean(gatewayApiKey), tools: mcpToolNames };
 }
 
 async function query(sql, params = []) {
@@ -3863,32 +3853,6 @@ function githubErrorMessage(status, detail) {
   return `github_list_failed_${status}${detail ? `: ${detail.slice(0, 240)}` : ""}`;
 }
 
-async function proxyGatewayTool(tool, payload) {
-  const response = await fetch(`http://gateway:7000/tools/${encodeURIComponent(tool)}`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      ...(gatewayApiKey ? { "x-api-key": gatewayApiKey } : {})
-    },
-    body: JSON.stringify(payload),
-    signal: AbortSignal.timeout(20_000)
-  });
-
-  const text = await response.text();
-  let body;
-  try {
-    body = text ? JSON.parse(text) : {};
-  } catch {
-    body = { raw: text };
-  }
-
-  return {
-    status: response.status,
-    ok: response.ok,
-    body
-  };
-}
-
 async function serveStatic(req, res, pathname) {
   const cleanPath = pathname === "/" ? "/index.html" : pathname;
   const filePath = path.resolve(publicDir, `.${cleanPath}`);
@@ -3944,13 +3908,7 @@ async function handleApi(req, res, url) {
   }
 
   if (req.method === "GET" && url.pathname === "/api/mcp") {
-    sendJson(res, 200, await listGatewayTools(req));
-    return;
-  }
-
-  if (req.method === "POST" && url.pathname === "/api/mcp/test") {
-    const body = await readBody(req);
-    sendJson(res, 200, await proxyGatewayTool(body.tool, body.payload || {}));
+    sendJson(res, 200, await mcpGatewayInfo(req));
     return;
   }
 

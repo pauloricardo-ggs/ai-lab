@@ -233,7 +233,7 @@ if [ ! -f ".env" ]; then
   ask_default "POSTGRES_IMAGE" "Imagem PostgreSQL" "postgres:17.5-alpine"
   ask_default "QDRANT_IMAGE" "Imagem Qdrant" "qdrant/qdrant:v1.17.1"
   ask_default "NEO4J_IMAGE" "Imagem Neo4j" "neo4j:5.26.8"
-  ask_default "OPEN_WEBUI_IMAGE" "Imagem Open WebUI" "ghcr.io/open-webui/open-webui:v0.6.15"
+  ask_default "OPEN_WEBUI_IMAGE" "Imagem Open WebUI" "ghcr.io/open-webui/open-webui:v0.9.5"
   ask_default "OLLAMA_IMAGE" "Imagem Ollama" "ollama/ollama:0.22.1"
   ask_default "NODE_IMAGE" "Imagem Node" "node:22.17.0-alpine"
   ask_default "DOTNET_SDK_IMAGE" "Imagem .NET SDK" "mcr.microsoft.com/dotnet/sdk:8.0"

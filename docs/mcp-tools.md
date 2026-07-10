@@ -2,12 +2,9 @@
 
 ## Gateway
 
-O Gateway expoe `GET /health`, `GET /tools` e `POST /tools/:tool`.
+O Gateway expõe somente o endpoint MCP Streamable HTTP `POST/GET /mcp`. Ele implementa JSON-RPC MCP (`initialize`, `tools/list` e `tools/call`) e roteia internamente para os serviços de código, conhecimento e Git.
 
-Todas as chamadas de tool exigem:
-
-- header `x-api-key` quando `GATEWAY_API_KEY` estiver configurado
-- `workspace_id` ou `workspace_slug` no corpo JSON
+Para registrar em um agente, use a URL `http://<IP_DO_SERVIDOR>:7000/mcp` e o header `Authorization: Bearer <GATEWAY_API_KEY>`. Todas as tools exigem `workspace_id` ou `workspace_slug` nos argumentos.
 
 ## Knowledge MCP
 

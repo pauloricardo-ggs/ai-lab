@@ -207,11 +207,11 @@
                 </div>
                 <div>
                   <span>Header</span>
-                  <code>x-api-key: &lt;GATEWAY_API_KEY&gt;</code>
+                  <code>Authorization: Bearer &lt;GATEWAY_API_KEY&gt;</code>
                 </div>
                 <div>
                   <span>Workspace</span>
-                  <code>workspace_id ou workspace_slug no payload</code>
+                  <code>workspace_id ou workspace_slug nos argumentos da tool</code>
                 </div>
               </div>
 
@@ -224,30 +224,16 @@
             <section class="panel">
               <div class="panel-header">
                 <div>
-                  <p class="eyebrow">Tool Tester</p>
-                  <h2>Executar tool</h2>
+                  <p class="eyebrow">Configuracao</p>
+                  <h2>Registrar em um agente</h2>
                 </div>
               </div>
-
-              <form id="toolTestForm" class="tool-form">
-                <label>
-                  Tool
-                  <select id="toolSelect"></select>
-                </label>
-                <label>
-                  Workspace
-                  <select id="toolWorkspaceSelect"></select>
-                </label>
-                <label>
-                  Payload JSON
-                  <textarea id="toolPayload" spellcheck="false">{
-  "query": "politica de reembolso"
-}</textarea>
-                </label>
-                <button class="primary-button" type="submit">Executar</button>
-              </form>
-
-              <pre id="toolResponse" class="response-block">Aguardando execucao.</pre>
+              <div class="info-stack">
+                <div><strong>Codex, Claude e Copilot</strong><span>Cadastre a URL acima como servidor MCP remoto com transporte Streamable HTTP.</span></div>
+                <div><strong>Autenticacao</strong><span>Use o header <code>Authorization: Bearer &lt;GATEWAY_API_KEY&gt;</code>.</span></div>
+                <div><strong>Open WebUI</strong><span>Em Admin Settings → External Tools, adicione um servidor MCP (Streamable HTTP), informe a URL e o token. Depois habilite a tool na conversa.</span></div>
+                <div><strong>Workspace</strong><span>As tools exigem <code>workspace_slug</code> ou <code>workspace_id</code>. Inclua-o nas instrucoes do modelo ou na pergunta.</span></div>
+              </div>
             </section>
           </div>
         </section>

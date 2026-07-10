@@ -102,7 +102,7 @@ Exemplo inicial:
 POSTGRES_IMAGE=postgres:17.5-alpine
 QDRANT_IMAGE=qdrant/qdrant:v1.17.1
 NEO4J_IMAGE=neo4j:5.26.8
-OPEN_WEBUI_IMAGE=ghcr.io/open-webui/open-webui:v0.6.15
+OPEN_WEBUI_IMAGE=ghcr.io/open-webui/open-webui:v0.9.5
 NODE_IMAGE=node:22.17.0-alpine
 DOTNET_IMAGE=mcr.microsoft.com/dotnet/sdk:9.0
 
@@ -254,7 +254,7 @@ networks:
 POSTGRES_IMAGE=postgres:17.5-alpine
 QDRANT_IMAGE=qdrant/qdrant:v1.17.1
 NEO4J_IMAGE=neo4j:5.26.8
-OPEN_WEBUI_IMAGE=ghcr.io/open-webui/open-webui:v0.6.15
+OPEN_WEBUI_IMAGE=ghcr.io/open-webui/open-webui:v0.9.5
 NODE_IMAGE=node:22.17.0-alpine
 # Ports
 POSTGRES_PORT=5432
@@ -483,7 +483,7 @@ if [ ! -f ".env" ]; then
   ask_default "POSTGRES_IMAGE" "Imagem PostgreSQL" "postgres:17.5-alpine"
   ask_default "QDRANT_IMAGE" "Imagem Qdrant" "qdrant/qdrant:v1.17.1"
   ask_default "NEO4J_IMAGE" "Imagem Neo4j" "neo4j:5.26.8"
-  ask_default "OPEN_WEBUI_IMAGE" "Imagem Open WebUI" "ghcr.io/open-webui/open-webui:v0.6.15"
+  ask_default "OPEN_WEBUI_IMAGE" "Imagem Open WebUI" "ghcr.io/open-webui/open-webui:v0.9.5"
   ask_default "NODE_IMAGE" "Imagem Node" "node:22.17.0-alpine"
   ask_default "POSTGRES_PORT" "Porta PostgreSQL" "5432"
   ask_default "QDRANT_HTTP_PORT" "Porta HTTP Qdrant" "6333"
@@ -1174,7 +1174,7 @@ Exemplo genérico:
 
 [mcp_servers.company]
 url = "http://<IP_DO_SERVIDOR>:7000"
-headers = { "x-api-key" = "<GATEWAY_API_KEY>" }
+headers = { "Authorization" = "Bearer <GATEWAY_API_KEY>" }
 
 ⸻
 

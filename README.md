@@ -150,8 +150,8 @@ Exemplo generico:
 
 ```toml
 [mcp_servers.company]
-url = "http://<IP_DO_SERVIDOR>:7000"
-headers = { "x-api-key" = "<GATEWAY_API_KEY>" }
+url = "http://<IP_DO_SERVIDOR>:7000/mcp"
+headers = { "Authorization" = "Bearer <GATEWAY_API_KEY>" }
 ```
 
 O Gateway exige `workspace_id` ou `workspace_slug` em chamadas de tools para impedir vazamento entre workspaces.
@@ -163,7 +163,7 @@ A Admin UI e o portal operacional da plataforma. Ela oferece:
 - dashboard de servicos disponiveis
 - links para Open WebUI, Qdrant e Neo4j
 - pagina operacional do MCP Gateway
-- testador de tools MCP
+- guia para registrar o MCP Gateway em agentes e no Open WebUI
 - dashboard de containers e status de runtime
 - criacao/listagem/remocao de workspaces
 - criacao automatica da pasta `data/repos/<workspace_slug>`

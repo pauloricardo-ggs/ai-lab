@@ -65,11 +65,6 @@ const els = {
   mcpBaseUrl: document.querySelector("#mcpBaseUrl"),
   mcpConfigExample: document.querySelector("#mcpConfigExample"),
   toolList: document.querySelector("#toolList"),
-  toolSelect: document.querySelector("#toolSelect"),
-  toolWorkspaceSelect: document.querySelector("#toolWorkspaceSelect"),
-  toolPayload: document.querySelector("#toolPayload"),
-  toolTestForm: document.querySelector("#toolTestForm"),
-  toolResponse: document.querySelector("#toolResponse"),
   toast: document.querySelector("#toast")
 };
 
@@ -244,10 +239,6 @@ function renderWorkspaces() {
     `).join("");
   }
 
-  els.toolWorkspaceSelect.innerHTML = [
-    `<option value="">Selecionar workspace</option>`,
-    ...state.workspaces.map((workspace) => `<option value="${workspace.slug}">${escapeHtml(workspace.name)} (${escapeHtml(workspace.slug)})</option>`)
-  ].join("");
 }
 
 function resetIndexJobState() {
@@ -726,16 +717,13 @@ function formatDateTime(value) {
 function renderMcp() {
   els.mcpBaseUrl.textContent = state.mcp.base_url || "-";
   els.mcpConfigExample.textContent = `[mcp_servers.company]
-url = "${state.mcp.base_url || "http://<IP_DO_SERVIDOR>:7000"}"
-headers = { "x-api-key" = "<GATEWAY_API_KEY>" }`;
+url = "${state.mcp.base_url || "http://<IP_DO_SERVIDOR>:7000/mcp"}"
+headers = { "Authorization" = "Bearer <GATEWAY_API_KEY>" }`;
 
   els.toolList.innerHTML = state.mcp.tools.length
     ? state.mcp.tools.map((tool) => `<span>${escapeHtml(tool)}</span>`).join("")
     : `<div class="empty-state">Nenhuma tool disponivel ou Gateway indisponivel.</div>`;
 
-  els.toolSelect.innerHTML = state.mcp.tools.length
-    ? state.mcp.tools.map((tool) => `<option value="${tool}">${escapeHtml(tool)}</option>`).join("")
-    : `<option value="">Sem tools</option>`;
 }
 
 async function loadServices() {
@@ -1087,29 +1075,6 @@ els.repoForm.addEventListener("submit", async (event) => {
     const button = els.repoForm.querySelector("button");
     button.disabled = false;
     button.textContent = "Adicionar e clonar";
-  }
-});
-
-els.toolTestForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  try {
-    const payload = JSON.parse(els.toolPayload.value || "{}");
-    const workspaceSlug = els.toolWorkspaceSelect.value;
-    if (workspaceSlug && !payload.workspace_slug && !payload.workspace_id) {
-      payload.workspace_slug = workspaceSlug;
-    }
-
-    els.toolResponse.textContent = "Executando...";
-    const data = await api("/api/mcp/test", {
-      method: "POST",
-      body: JSON.stringify({
-        tool: els.toolSelect.value,
-        payload
-      })
-    });
-    els.toolResponse.textContent = JSON.stringify(data, null, 2);
-  } catch (error) {
-    els.toolResponse.textContent = error.message;
   }
 });
 
