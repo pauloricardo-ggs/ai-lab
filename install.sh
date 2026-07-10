@@ -90,7 +90,7 @@ mask_value() {
 
 prompt_existing_env_values() {
   local line var example_value current display value
-  while IFS= read -r line || [ -n "$line" ]; do
+  while IFS= read -r line <&3 || [ -n "$line" ]; do
     [[ "$line" =~ ^[[:space:]]*# || -z "$line" || "$line" != *=* ]] && continue
     var="${line%%=*}"
     example_value="${line#*=}"
@@ -98,11 +98,13 @@ prompt_existing_env_values() {
     if [ -z "$current" ]; then current="$example_value"; fi
     display="$current"
     if is_sensitive_var "$var"; then display="$(mask_value "$current")"; fi
-    read -r -p "$var [$display]: " value
+    # A lista de campos usa o descritor 3; a resposta deve sempre vir do terminal.
+    # Sem isso, `read` consome a proxima linha do .env.example e corrompe valores.
+    read -r -p "$var [$display]: " value < /dev/tty
     if [ -n "$value" ]; then
       set_env_value "$var" "$value"
     fi
-  done < .env.example
+  done 3< .env.example
 }
 
 create_directories() {
@@ -218,6 +220,8 @@ if [ -f ".env" ]; then
   read -r -p "Deseja atualizar configuracoes mantendo os valores atuais? [s/N]: " update_existing
   if [[ "$update_existing" == "s" || "$update_existing" == "S" ]]; then
     updating_existing_env=true
+    cp .env ".env.before-update.$(date +%Y%m%d%H%M%S)"
+    echo "Backup criado antes da edicao do .env."
   fi
 fi
 
