@@ -12,7 +12,8 @@ const state = {
     page: 1,
     limit: 6,
     total: 0,
-    totalPages: 1
+    totalPages: 1,
+    queue: { paused: false, max_concurrent_repositories: 1 }
   }
 };
 
@@ -59,6 +60,7 @@ const els = {
   indexHistorySummary: document.querySelector("#indexHistorySummary"),
   indexHistoryList: document.querySelector("#indexHistoryList"),
   indexPagination: document.querySelector("#indexPagination"),
+  queueControls: document.querySelector("#queueControls"),
   mcpStatus: document.querySelector("#mcpStatus"),
   mcpBaseUrl: document.querySelector("#mcpBaseUrl"),
   mcpConfigExample: document.querySelector("#mcpConfigExample"),
@@ -255,7 +257,8 @@ function resetIndexJobState() {
     page: 1,
     limit: state.indexJobs?.limit || 6,
     total: 0,
-    totalPages: 1
+    totalPages: 1,
+    queue: state.indexJobs?.queue || { paused: false, max_concurrent_repositories: 1 }
   };
 }
 
@@ -500,13 +503,19 @@ function renderFileIssues(issues) {
             <tr>
               <td><code>${escapeHtml(issue.file_path)}</code><br><span class="muted-text">${escapeHtml(issue.language || "-")}</span></td>
               <td><span class="status-pill ${issue.status === "error" ? "offline" : "warning"}">${escapeHtml(issue.status)}</span></td>
-              <td>${escapeHtml(issue.error || issue.skipped_reason || "-")}</td>
+              <td>${escapeHtml(issue.error || issue.skipped_reason || formatChunkFailures(issue.metadata) || "-")}</td>
             </tr>
           `).join("")}
         </tbody>
       </table>
     </div>
   `;
+}
+
+function formatChunkFailures(metadata) {
+  const failures = metadata?.failed_chunks;
+  if (!Array.isArray(failures) || !failures.length) return "";
+  return `${failures.length} chunk(s) com falha: ${failures.map((item) => `#${item.index} ${item.error}`).join("; ")}`;
 }
 
 function renderIndexJobs(error) {
@@ -523,6 +532,11 @@ function renderIndexJobs(error) {
     return;
   }
 
+  if (els.queueControls) {
+    const queue = state.indexJobs.queue || {};
+    els.queueControls.innerHTML = `<span class="muted-text">Fila ${queue.paused ? "pausada" : "ativa"} · concorrencia</span><select data-queue-concurrency><option value="1" ${Number(queue.max_concurrent_repositories) === 1 ? "selected" : ""}>1</option><option value="2" ${Number(queue.max_concurrent_repositories) === 2 ? "selected" : ""}>2</option><option value="3" ${Number(queue.max_concurrent_repositories) === 3 ? "selected" : ""}>3</option></select><button class="secondary-button small-button" data-toggle-queue>${queue.paused ? "Retomar fila" : "Pausar fila"}</button>`;
+  }
+
   const runningJobs = state.indexJobs.running || [];
   const historyJobs = state.indexJobs.history || [];
   const running = runningJobs.length;
@@ -537,7 +551,8 @@ function renderIndexJobs(error) {
     return;
   }
 
-  els.indexSummary.textContent = running ? `${running} em andamento` : "Nenhuma em execucao";
+  const queued = runningJobs.filter((job) => job.status === "queued").length;
+  els.indexSummary.textContent = running ? `${running} ativo(s)${queued ? ` · ${queued} na fila` : ""}` : "Nenhuma em execucao";
   els.indexSummary.className = `status-pill ${running ? "warning" : "muted"}`;
   els.indexRunningList.innerHTML = running
     ? runningJobs.map((job) => renderIndexJob(job, { compact: false })).join("")
@@ -561,6 +576,7 @@ function renderIndexJob(job, options = {}) {
   const chunkDone = Number(job.chunks_indexed || 0);
   const repoName = job.repository_name || job.current_repository || "workspace";
   const currentFile = job.current_file ? `<span title="${escapeHtml(job.current_file)}">${escapeHtml(job.current_file)}</span>` : "<span>-</span>";
+  const metrics = job.metrics || {};
 
   return `
     <article class="index-job ${options.compact ? "compact" : ""}">
@@ -571,7 +587,7 @@ function renderIndexJob(job, options = {}) {
         </div>
         <div class="job-actions">
           <span class="status-pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span>
-          ${!options.compact && isIndexJobRunning(job) ? `<button class="danger-button small-button" data-cancel-index-job="${job.id}" ${job.status === "canceling" ? "disabled" : ""}>${job.status === "canceling" ? "Cancelando" : "Cancelar"}</button>` : ""}
+          ${!options.compact && isIndexJobRunning(job) ? `${job.status === "queued" ? `<button class="secondary-button small-button" data-queue-action="pause" data-index-job="${job.id}">Pausar</button><button class="secondary-button small-button" data-queue-action="top" data-index-job="${job.id}">Topo</button><button class="secondary-button small-button" data-queue-action="up" data-index-job="${job.id}">↑</button><button class="secondary-button small-button" data-queue-action="down" data-index-job="${job.id}">↓</button><button class="secondary-button small-button" data-queue-action="priority" data-index-job="${job.id}">Prioridade</button>` : job.status === "paused" ? `<button class="secondary-button small-button" data-queue-action="resume" data-index-job="${job.id}">Retomar</button><button class="secondary-button small-button" data-queue-action="priority" data-index-job="${job.id}">Prioridade</button>` : ""}<button class="danger-button small-button" data-cancel-index-job="${job.id}" ${job.status === "canceling" ? "disabled" : ""}>${job.status === "canceling" ? "Cancelando" : "Cancelar"}</button>` : ""}
         </div>
       </header>
       <div class="job-meta">
@@ -599,6 +615,9 @@ function renderIndexJob(job, options = {}) {
           <span>Inicio</span>
           <strong>${formatDateTime(job.started_at || job.created_at)}</strong>
         </div>
+        <div><span>Tempo em fila</span><strong>${formatDuration((job.started_after ? new Date(job.started_after) : new Date()) - new Date(job.created_at))}</strong></div>
+        <div><span>Prioridade</span><strong>${Number(job.priority || 100)}</strong></div>
+        ${job.queue_position !== null && job.queue_position !== undefined ? `<div><span>Posicao</span><strong>${Number(job.queue_position)}</strong></div>` : ""}
         <div>
           <span>Fim</span>
           <strong>${formatDateTime(job.finished_at)}</strong>
@@ -612,9 +631,15 @@ function renderIndexJob(job, options = {}) {
         <span>Chunks ${chunkDone}/${chunkTotal || "-"}</span>
         ${renderProgressBar(chunkDone, chunkTotal)}
       </div>
+      ${metrics.total_ms ? `<div class="muted-text">Metricas: execucao ${formatDuration(metrics.total_ms)} · scan ${formatDuration(metrics.scan_ms)} · parsing ${formatDuration(metrics.parsing_ms)} · embeddings ${formatDuration(metrics.embedding_ms)} · Qdrant ${formatDuration(metrics.qdrant_write_ms)} · PostgreSQL ${formatDuration(metrics.postgres_write_ms)} · Neo4j ${formatDuration(metrics.neo4j_write_ms)} · ${escapeHtml(metrics.chunks_per_minute || 0)} chunks/min</div>` : ""}
       ${job.error ? `<div class="job-error">${escapeHtml(job.error)}</div>` : ""}
     </article>
   `;
+}
+
+function formatDuration(milliseconds) {
+  const seconds = Math.max(0, Math.round(Number(milliseconds || 0) / 1000));
+  return seconds >= 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${seconds}s`;
 }
 
 function renderIndexPagination() {
@@ -641,7 +666,7 @@ function renderProgressBar(done, total) {
 }
 
 function isIndexJobRunning(job) {
-  return ["pending", "running", "canceling"].includes(job.status);
+  return ["queued", "running", "paused", "canceling"].includes(job.status);
 }
 
 function jobStatusClass(status) {
@@ -659,7 +684,8 @@ function jobStatusClass(status) {
 
 function jobStatusLabel(status) {
   const labels = {
-    pending: "Pendente",
+    queued: "Na fila",
+    paused: "Pausado",
     running: "Rodando",
     canceling: "Cancelando",
     canceled: "Cancelado",
@@ -764,6 +790,7 @@ async function loadIndexJobs(slug = state.selectedWorkspace?.slug) {
     state.indexJobs.limit = historyData.pagination?.limit || state.indexJobs.limit;
     state.indexJobs.total = historyData.pagination?.total || 0;
     state.indexJobs.totalPages = historyData.pagination?.total_pages || 1;
+    state.indexJobs.queue = runningData.queue || state.indexJobs.queue;
     renderIndexJobs();
   } catch (error) {
     renderIndexJobs(error.message);
@@ -887,6 +914,33 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
+  const queueActionButton = event.target.closest("[data-queue-action]");
+  if (queueActionButton && state.selectedWorkspace) {
+    try {
+      let payload = {};
+      if (queueActionButton.dataset.queueAction === "priority") {
+        const value = prompt("Prioridade (0 = mais alta, 1000 = mais baixa):", "100");
+        if (value === null) return;
+        payload = { priority: Number(value) };
+      }
+      await api(`/api/workspaces/${encodeURIComponent(state.selectedWorkspace.slug)}/index-jobs/${encodeURIComponent(queueActionButton.dataset.indexJob)}/queue/${encodeURIComponent(queueActionButton.dataset.queueAction)}`, { method: "POST", body: JSON.stringify(payload) });
+      await loadIndexJobs(state.selectedWorkspace.slug);
+    } catch (error) {
+      toast(error.message);
+    }
+    return;
+  }
+
+  if (event.target.closest("[data-toggle-queue]")) {
+    try {
+      await api("/api/index-queue", { method: "PUT", body: JSON.stringify({ paused: !state.indexJobs.queue?.paused }) });
+      await loadIndexJobs();
+    } catch (error) {
+      toast(error.message);
+    }
+    return;
+  }
+
   const deleteRepoButton = event.target.closest("[data-delete-repo]");
   const reindexRepoButton = event.target.closest("[data-reindex-repo]");
   if (reindexRepoButton && state.selectedWorkspace) {
@@ -990,6 +1044,16 @@ els.remoteRepoSelect.addEventListener("change", () => {
   els.repoName.value = repo.name;
   els.repoUrl.value = repo.url;
   els.repoBranch.value = repo.default_branch || "main";
+});
+
+document.addEventListener("change", async (event) => {
+  if (!event.target.matches("[data-queue-concurrency]")) return;
+  try {
+    await api("/api/index-queue", { method: "PUT", body: JSON.stringify({ max_concurrent_repositories: Number(event.target.value) }) });
+    await loadIndexJobs();
+  } catch (error) {
+    toast(error.message);
+  }
 });
 
 els.repoForm.addEventListener("submit", async (event) => {

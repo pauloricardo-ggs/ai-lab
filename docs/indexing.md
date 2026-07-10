@@ -51,7 +51,17 @@ O status do repositorio muda para `indexed` quando a indexacao termina. Se falha
 
 Cada execucao grava um job em `code_index_jobs` com `scope = workspace`, fase atual, repositorio atual, arquivo atual, total de arquivos do repositorio, arquivos indexaveis, arquivos ignorados, total de chunks, chunks processados, simbolos e erro. A Admin UI consulta esses jobs para exibir progresso em tempo real na tela de detalhe do workspace, separando jobs em execucao do historico finalizado paginado.
 
-Um repositorio nao pode ter duas indexacoes ativas ao mesmo tempo. Se ja houver job `pending`, `running` ou `canceling`, a tentativa de reindexacao retorna `repository_index_already_running`. Jobs ativos podem ser cancelados pela Admin UI; o job passa por `canceling` e termina como `canceled`.
+## Fila e resiliencia
+
+Os jobs sao persistidos primeiro como `queued`; o scheduler inicia no maximo `INDEX_MAX_CONCURRENT_REPOSITORIES` repositorios (entre 1 e 3) e nunca executa dois jobs do mesmo repositorio. A fila pode ser pausada globalmente e jobs aguardando podem ser pausados, retomados, cancelados, enviados ao topo, movidos para cima/baixo e ter sua prioridade alterada pela Admin UI. Isso tambem permite retomar jobs aguardando depois de reiniciar o container.
+
+Migrations C# historicas dentro de `Migrations/` sao registradas como `migration_file` e ignoradas por padrao. Arquivos `*Snapshot.cs` continuam indexaveis.
+
+Antes de chamar o Ollama, chunks que ultrapassam `EMBEDDING_MAX_CHARS` ou `EMBEDDING_MAX_LINES` sao subdivididos e recebem `split_reason=embedding_context_limit`, `parent_chunk_index` e `subchunk_index`. Como último recurso, um erro de contexto aplica truncamento marcado por `truncated=true` e `truncate_reason=embedding_context_limit`. Timeouts e retries são configurados no `.env`; falhas isoladas de chunk ficam no metadata do arquivo e não interrompem seus demais chunks ou o repositório.
+
+O job armazena métricas de scan, parsing, embeddings, escrita no Qdrant/PostgreSQL/Neo4j, throughput, duração de execução e tempo em fila em `metrics`/campos do job — inclusive quando a execução falha.
+
+Um repositorio nao pode ter duas indexacoes ativas ou aguardando ao mesmo tempo. Se ja houver job `queued`, `running`, `paused` ou `canceling`, a tentativa de reindexacao retorna `repository_index_already_running`. Jobs ativos podem ser cancelados pela Admin UI; o job passa por `canceling` e termina como `canceled`.
 
 ## Indexacao Incremental
 

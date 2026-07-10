@@ -1,0 +1,93 @@
+{
+  "format": 1,
+  "restore": {
+    "/Users/pauloricardo/Developer/PersonalRepos/poc-ai/workers/roslyn-indexer/RoslynIndexer.csproj": {}
+  },
+  "projects": {
+    "/Users/pauloricardo/Developer/PersonalRepos/poc-ai/workers/roslyn-indexer/RoslynIndexer.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "/Users/pauloricardo/Developer/PersonalRepos/poc-ai/workers/roslyn-indexer/RoslynIndexer.csproj",
+        "projectName": "RoslynIndexer",
+        "projectPath": "/Users/pauloricardo/Developer/PersonalRepos/poc-ai/workers/roslyn-indexer/RoslynIndexer.csproj",
+        "packagesPath": "/Users/pauloricardo/.nuget/packages/",
+        "outputPath": "/Users/pauloricardo/Developer/PersonalRepos/poc-ai/workers/roslyn-indexer/obj/",
+        "projectStyle": "PackageReference",
+        "configFilePaths": [
+          "/Users/pauloricardo/.nuget/NuGet/NuGet.Config"
+        ],
+        "originalTargetFrameworks": [
+          "net8.0"
+        ],
+        "sources": {
+          "/Users/pauloricardo/Developer/LocalNuget": {},
+          "https://api.nuget.org/v3/index.json": {},
+          "https://clapsapi-630846882981.d.codeartifact.us-east-1.amazonaws.com/nuget/dotnet-tool-ma9/v3/index.json": {},
+          "https://clapsapi-630846882981.d.codeartifact.us-east-1.amazonaws.com/nuget/nuget-dev-v2/v3/index.json": {}
+        },
+        "frameworks": {
+          "net8.0": {
+            "targetAlias": "net8.0",
+            "projectReferences": {}
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        },
+        "SdkAnalysisLevel": "10.0.100"
+      },
+      "frameworks": {
+        "net8.0": {
+          "targetAlias": "net8.0",
+          "dependencies": {
+            "Microsoft.CodeAnalysis.CSharp": {
+              "target": "Package",
+              "version": "[4.10.0, )"
+            }
+          },
+          "imports": [
+            "net461",
+            "net462",
+            "net47",
+            "net471",
+            "net472",
+            "net48",
+            "net481"
+          ],
+          "assetTargetFallback": true,
+          "warn": true,
+          "downloadDependencies": [
+            {
+              "name": "Microsoft.AspNetCore.App.Ref",
+              "version": "[8.0.22, 8.0.22]"
+            },
+            {
+              "name": "Microsoft.NETCore.App.Host.osx-arm64",
+              "version": "[8.0.22, 8.0.22]"
+            },
+            {
+              "name": "Microsoft.NETCore.App.Ref",
+              "version": "[8.0.22, 8.0.22]"
+            }
+          ],
+          "frameworkReferences": {
+            "Microsoft.AspNetCore.App": {
+              "privateAssets": "none"
+            },
+            "Microsoft.NETCore.App": {
+              "privateAssets": "all"
+            }
+          },
+          "runtimeIdentifierGraphPath": "/usr/local/share/dotnet/sdk/10.0.100/PortableRuntimeIdentifierGraph.json"
+        }
+      }
+    }
+  }
+}

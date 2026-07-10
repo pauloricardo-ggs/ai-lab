@@ -160,11 +160,29 @@ CREATE TABLE IF NOT EXISTS code_index_jobs (
     total_chunks INTEGER NOT NULL DEFAULT 0,
     chunks_indexed INTEGER NOT NULL DEFAULT 0,
     symbols_indexed INTEGER NOT NULL DEFAULT 0,
+    priority INTEGER NOT NULL DEFAULT 100,
+    queue_position INTEGER,
+    requested_by TEXT,
+    locked_at TIMESTAMP,
+    worker_id TEXT,
+    started_after TIMESTAMP,
+    metrics JSONB NOT NULL DEFAULT '{}',
     started_at TIMESTAMP,
     finished_at TIMESTAMP,
     error TEXT,
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS code_index_queue_settings (
+    id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+    paused BOOLEAN NOT NULL DEFAULT FALSE,
+    max_concurrent_repositories INTEGER NOT NULL DEFAULT 1 CHECK (max_concurrent_repositories BETWEEN 1 AND 3),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO code_index_queue_settings (id, max_concurrent_repositories)
+VALUES (TRUE, 1)
+ON CONFLICT (id) DO NOTHING;
 
 CREATE TABLE IF NOT EXISTS mcp_audit_logs (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -200,3 +218,4 @@ CREATE INDEX IF NOT EXISTS idx_code_index_files_repository_id ON code_index_file
 CREATE INDEX IF NOT EXISTS idx_code_index_files_status ON code_index_files(status);
 CREATE INDEX IF NOT EXISTS idx_code_index_jobs_repository_id ON code_index_jobs(repository_id);
 CREATE INDEX IF NOT EXISTS idx_code_index_jobs_workspace_id ON code_index_jobs(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_code_index_jobs_queue ON code_index_jobs(status, priority, queue_position, created_at);

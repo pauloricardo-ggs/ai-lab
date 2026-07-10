@@ -73,6 +73,38 @@ set_env_value() {
   rm "$tmp_file"
 }
 
+is_sensitive_var() {
+  [[ "$1" == *_PASSWORD || "$1" == *_SECRET || "$1" == *_KEY || "$1" == *_TOKEN ]]
+}
+
+mask_value() {
+  local value="$1"
+  if [ -z "$value" ]; then
+    echo ""
+  elif [ "${#value}" -le 8 ]; then
+    echo "********"
+  else
+    echo "${value:0:4}********${value: -4}"
+  fi
+}
+
+prompt_existing_env_values() {
+  local line var example_value current display value
+  while IFS= read -r line || [ -n "$line" ]; do
+    [[ "$line" =~ ^[[:space:]]*# || -z "$line" || "$line" != *=* ]] && continue
+    var="${line%%=*}"
+    example_value="${line#*=}"
+    current="$(env_value "$var")"
+    if [ -z "$current" ]; then current="$example_value"; fi
+    display="$current"
+    if is_sensitive_var "$var"; then display="$(mask_value "$current")"; fi
+    read -r -p "$var [$display]: " value
+    if [ -n "$value" ]; then
+      set_env_value "$var" "$value"
+    fi
+  done < .env.example
+}
+
 create_directories() {
   mkdir -p \
     data/postgres/db \
@@ -180,13 +212,12 @@ pull_ollama_models() {
 echo "Este script ira preparar o servidor e subir a stack Docker."
 echo ""
 
+updating_existing_env=false
 if [ -f ".env" ]; then
   echo "Arquivo .env ja existe."
-  read -r -p "Deseja sobrescrever o .env? [s/N]: " overwrite
-  if [[ "$overwrite" != "s" && "$overwrite" != "S" ]]; then
-    echo "Mantendo .env existente."
-  else
-    rm .env
+  read -r -p "Deseja atualizar configuracoes mantendo os valores atuais? [s/N]: " update_existing
+  if [[ "$update_existing" == "s" || "$update_existing" == "S" ]]; then
+    updating_existing_env=true
   fi
 fi
 
@@ -231,6 +262,11 @@ fi
 
 ensure_env_default "ADMIN_PORT" "8080"
 ensure_env_default "ADMIN_API_KEY" "$(generate_secret)"
+ensure_env_default "POSTGRES_PASSWORD" "$(generate_secret)"
+ensure_env_default "QDRANT_API_KEY" "$(generate_secret)"
+ensure_env_default "NEO4J_PASSWORD" "$(generate_secret)"
+ensure_env_default "OPEN_WEBUI_SECRET_KEY" "$(generate_secret)"
+ensure_env_default "GATEWAY_API_KEY" "$(generate_secret)"
 ensure_env_default "OLLAMA_IMAGE" "ollama/ollama:0.22.1"
 ensure_env_default "NODE_IMAGE" "node:22.17.0-alpine"
 ensure_env_default "DOTNET_SDK_IMAGE" "mcr.microsoft.com/dotnet/sdk:8.0"
@@ -240,11 +276,35 @@ ensure_env_default "LLM_PROVIDER" "ollama"
 ensure_env_default "LOCAL_CHAT_MODEL" "qwen2.5:7b-instruct"
 ensure_env_default "EMBEDDING_MODEL" "nomic-embed-text"
 ensure_env_default "EMBEDDING_VECTOR_SIZE" "768"
+ensure_env_default "EMBEDDING_MAX_CHARS" "6000"
+ensure_env_default "EMBEDDING_MAX_LINES" "80"
+ensure_env_default "EMBEDDING_TIMEOUT_MS" "120000"
+ensure_env_default "EMBEDDING_MAX_RETRIES" "2"
+ensure_env_default "ROSLYN_TIMEOUT_MS" "45000"
+ensure_env_default "NEO4J_TIMEOUT_MS" "60000"
+ensure_env_default "INDEX_FILE_TIMEOUT_MS" "300000"
+ensure_env_default "INDEX_MAX_CONCURRENT_REPOSITORIES" "1"
+ensure_env_default "INDEX_IGNORE_MIGRATIONS" "true"
 if grep -q "^LLM_PROVIDER=openai$" .env; then
   set_env_value "LLM_PROVIDER" "ollama"
 fi
 ensure_env_default "GITHUB_TOKEN" ""
 ensure_env_default "GITHUB_OWNER" ""
+
+if [ "$updating_existing_env" = true ]; then
+  echo "Pressione Enter para manter cada valor atual. Valores sensiveis sao mascarados."
+  prompt_existing_env_values
+  read -r -p "Regenerar secrets existentes (senhas e chaves)? [s/N]: " regenerate_secrets
+  if [[ "$regenerate_secrets" == "s" || "$regenerate_secrets" == "S" ]]; then
+    set_env_value "POSTGRES_PASSWORD" "$(generate_secret)"
+    set_env_value "QDRANT_API_KEY" "$(generate_secret)"
+    set_env_value "NEO4J_PASSWORD" "$(generate_secret)"
+    set_env_value "OPEN_WEBUI_SECRET_KEY" "$(generate_secret)"
+    set_env_value "GATEWAY_API_KEY" "$(generate_secret)"
+    set_env_value "ADMIN_API_KEY" "$(generate_secret)"
+    echo "Secrets regenerados por solicitacao explicita."
+  fi
+fi
 
 echo ""
 echo "Resumo da instalacao:"

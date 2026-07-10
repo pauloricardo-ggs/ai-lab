@@ -115,8 +115,19 @@ const languageByFilename = new Map([
 const maxIndexFileBytes = 512 * 1024;
 const chunkLineSize = 120;
 const chunkLineOverlap = 20;
+const embeddingMaxChars = Math.max(500, Number(process.env.EMBEDDING_MAX_CHARS || 6000));
+const embeddingMaxLines = Math.max(1, Number(process.env.EMBEDDING_MAX_LINES || 80));
+const embeddingContentMaxChars = Math.max(100, embeddingMaxChars - 800);
+const embeddingContentMaxLines = Math.max(1, embeddingMaxLines - 8);
+const embeddingTimeoutMs = Math.max(1_000, Number(process.env.EMBEDDING_TIMEOUT_MS || 120000));
+const embeddingMaxRetries = Math.max(0, Number(process.env.EMBEDDING_MAX_RETRIES || 2));
+const roslynTimeoutMs = Math.max(1_000, Number(process.env.ROSLYN_TIMEOUT_MS || 45000));
+const neo4jTimeoutMs = Math.max(1_000, Number(process.env.NEO4J_TIMEOUT_MS || 60000));
+const indexFileTimeoutMs = Math.max(1_000, Number(process.env.INDEX_FILE_TIMEOUT_MS || 300000));
+const indexIgnoreMigrations = String(process.env.INDEX_IGNORE_MIGRATIONS || "true").toLowerCase() !== "false";
+const configuredIndexConcurrency = Math.min(3, Math.max(1, Number(process.env.INDEX_MAX_CONCURRENT_REPOSITORIES || 1)));
 const activeIndexJobs = new Map();
-const activeIndexStatuses = ["pending", "running", "canceling"];
+const activeIndexStatuses = ["queued", "running", "paused", "canceling"];
 
 class IndexCanceledError extends Error {
   constructor() {
@@ -454,12 +465,26 @@ async function ensureApplicationSchema() {
       total_chunks INTEGER NOT NULL DEFAULT 0,
       chunks_indexed INTEGER NOT NULL DEFAULT 0,
       symbols_indexed INTEGER NOT NULL DEFAULT 0,
+      priority INTEGER NOT NULL DEFAULT 100,
+      queue_position INTEGER,
+      requested_by TEXT,
+      locked_at TIMESTAMP,
+      worker_id TEXT,
+      started_after TIMESTAMP,
+      metrics JSONB NOT NULL DEFAULT '{}',
       started_at TIMESTAMP,
       finished_at TIMESTAMP,
       error TEXT,
       created_at TIMESTAMP NOT NULL DEFAULT NOW()
     )
   `);
+  await query(`CREATE TABLE IF NOT EXISTS code_index_queue_settings (
+    id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+    paused BOOLEAN NOT NULL DEFAULT FALSE,
+    max_concurrent_repositories INTEGER NOT NULL DEFAULT 1 CHECK (max_concurrent_repositories BETWEEN 1 AND 3),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+  )`);
+  await query("INSERT INTO code_index_queue_settings (id, max_concurrent_repositories) VALUES (TRUE, $1) ON CONFLICT (id) DO NOTHING", [configuredIndexConcurrency]);
   await query(`
     CREATE TABLE IF NOT EXISTS code_relationships (
       id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -509,6 +534,13 @@ async function ensureApplicationSchema() {
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS started_at TIMESTAMP");
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS finished_at TIMESTAMP");
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS error TEXT");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS priority INTEGER NOT NULL DEFAULT 100");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS queue_position INTEGER");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS requested_by TEXT");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS locked_at TIMESTAMP");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS worker_id TEXT");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS started_after TIMESTAMP");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS metrics JSONB NOT NULL DEFAULT '{}'");
   await query("ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS parent_name TEXT");
   await query("ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS parent_full_name TEXT");
   await query("ALTER TABLE code_relationships ADD COLUMN IF NOT EXISTS source_symbol_id UUID REFERENCES code_symbols(id) ON DELETE SET NULL");
@@ -534,6 +566,8 @@ async function ensureApplicationSchema() {
   await query("CREATE INDEX IF NOT EXISTS idx_code_index_files_status ON code_index_files(status)");
   await query("CREATE INDEX IF NOT EXISTS idx_code_index_jobs_repository_id ON code_index_jobs(repository_id)");
   await query("CREATE INDEX IF NOT EXISTS idx_code_index_jobs_workspace_id ON code_index_jobs(workspace_id)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_index_jobs_queue ON code_index_jobs(status, priority, queue_position, created_at)");
+  await query("UPDATE code_index_jobs SET status = 'queued', phase = 'queued', locked_at = NULL, worker_id = NULL WHERE status IN ('pending', 'running', 'canceling')");
 }
 
 async function listWorkspaces() {
@@ -754,9 +788,9 @@ async function getRepositoryIndexReport(workspaceIdOrSlug, repositoryId) {
     [repository.id]
   );
   const fileIssues = await query(
-    `SELECT file_path, language, status, skipped_reason, error, updated_at
+    `SELECT file_path, language, status, skipped_reason, error, metadata, updated_at
      FROM code_index_files
-     WHERE repository_id = $1 AND status IN ('skipped', 'error')
+     WHERE repository_id = $1 AND (status IN ('skipped', 'error') OR metadata ? 'failed_chunks')
      ORDER BY status DESC, file_path ASC
      LIMIT 100`,
     [repository.id]
@@ -832,6 +866,9 @@ async function listWorkspaceIndexJobs(workspaceIdOrSlug, options = {}) {
        j.scope,
        j.status,
        j.phase,
+       j.priority,
+       j.queue_position,
+       j.metrics,
        j.current_repository,
        j.current_file,
        j.total_files,
@@ -842,6 +879,7 @@ async function listWorkspaceIndexJobs(workspaceIdOrSlug, options = {}) {
        j.chunks_indexed,
        j.symbols_indexed,
        j.started_at,
+       j.started_after,
        j.finished_at,
        j.error,
        j.created_at
@@ -857,6 +895,7 @@ async function listWorkspaceIndexJobs(workspaceIdOrSlug, options = {}) {
   return {
     workspace,
     jobs: result.rows,
+    queue: await getQueueSettings(),
     pagination: {
       page,
       limit,
@@ -946,24 +985,18 @@ function abortSignalWithTimeout(signal, timeoutMs) {
   return AbortSignal.any([signal, timeoutSignal]);
 }
 
-async function indexRepository(workspace, repository) {
-  const existingJob = await findActiveRepositoryIndex(repository.id);
-  if (existingJob) {
-    const error = new Error("repository_index_already_running");
-    error.status = 409;
-    throw error;
-  }
-
+async function indexRepository(workspace, repository, jobId) {
   const controller = new AbortController();
-  const job = await query(
-    `INSERT INTO code_index_jobs (repository_id, workspace_id, scope, status, phase, current_repository, started_at)
-     VALUES ($1, $2, 'workspace', 'running', 'preparing', $3, NOW())
-     RETURNING id`,
-    [repository.id, workspace.id, repository.name]
-  );
-  const jobId = job.rows[0].id;
   activeIndexJobs.set(jobId, { controller, repositoryId: repository.id, workspaceId: workspace.id });
   let activeFilePath = null;
+  const metrics = { scan_ms: 0, parsing_ms: 0, embedding_ms: 0, qdrant_write_ms: 0, postgres_write_ms: 0, neo4j_write_ms: 0, started_at: new Date().toISOString() };
+  const persistMetrics = async () => {
+    metrics.total_ms = Date.now() - Date.parse(metrics.started_at);
+    metrics.files_per_second = metrics.total_ms ? Number(((metrics.files || 0) / (metrics.total_ms / 1000)).toFixed(2)) : 0;
+    metrics.chunks_per_minute = metrics.total_ms ? Number(((metrics.chunks || 0) / (metrics.total_ms / 60000)).toFixed(2)) : 0;
+    metrics.average_embedding_ms = metrics.chunks ? Math.round(metrics.embedding_ms / metrics.chunks) : 0;
+    await query("UPDATE code_index_jobs SET metrics = $2::jsonb WHERE id = $1", [jobId, JSON.stringify(metrics)]);
+  };
 
   try {
     assertIndexNotCanceled(controller.signal);
@@ -973,7 +1006,9 @@ async function indexRepository(workspace, repository) {
 
     await updateIndexJob(jobId, { phase: "scanning" });
     assertIndexNotCanceled(controller.signal);
+    const scanStartedAt = Date.now();
     const scan = await collectIndexableFiles(repository.local_path);
+    metrics.scan_ms = Date.now() - scanStartedAt;
     const files = scan.files;
     const previousFiles = await listRepositoryIndexFiles(repository.id);
     const hasFileInventory = previousFiles.size > 0;
@@ -1039,35 +1074,53 @@ async function indexRepository(workspace, repository) {
         }
 
         changedFiles += 1;
-        const analysis = await analyzeCodeFile(content, file, controller.signal);
+        const fileSignal = abortSignalWithTimeout(controller.signal, indexFileTimeoutMs);
+        const parseStartedAt = Date.now();
+        const analysis = await analyzeCodeFile(content, file, fileSignal);
+        metrics.parsing_ms += Date.now() - parseStartedAt;
         await cleanupFileIndex(repository.id, file.relativePath);
-        const fileChunks = chunkContent(content, file, analysis.symbols);
+        const fileChunks = splitChunksForEmbedding(chunkContent(content, file, analysis.symbols));
         totalChunks += fileChunks.length;
         await updateIndexJob(jobId, { phase: "embedding", totalChunks });
 
-        for (const chunk of fileChunks) {
+        const failedChunks = [];
+        for (const originalChunk of fileChunks) {
           assertIndexNotCanceled(controller.signal);
-          const pointId = randomUUID();
-          const embedding = await createEmbedding(buildChunkEmbeddingText(chunk), controller.signal);
-          assertIndexNotCanceled(controller.signal);
-          await upsertQdrantPoint(codeCollection, pointId, embedding, {
-            workspace_id: workspace.id,
-            workspace_slug: workspace.slug,
-            repository_id: repository.id,
-            repository_name: repository.name,
-            source_type: "code",
-            file_path: chunk.file.relativePath,
-            language: chunk.file.language,
-            chunk_index: chunk.index,
-            start_line: chunk.startLine,
-            end_line: chunk.endLine
-          });
-          await insertCodeChunk(workspace.id, repository.id, chunk, pointId);
-          indexedChunks += 1;
-          await incrementIndexJob(jobId, { chunks: 1 });
+          let chunk = originalChunk;
+          try {
+            const embeddingStartedAt = Date.now();
+            let embedding;
+            try {
+              embedding = await createEmbedding(buildChunkEmbeddingText(chunk), fileSignal);
+            } catch (embeddingError) {
+              if (!isContextLimitError(embeddingError)) throw embeddingError;
+              chunk = truncateChunkForEmbedding(chunk);
+              embedding = await createEmbedding(buildChunkEmbeddingText(chunk), fileSignal);
+            }
+            metrics.embedding_ms += Date.now() - embeddingStartedAt;
+            assertIndexNotCanceled(controller.signal);
+            const pointId = randomUUID();
+            const qdrantStartedAt = Date.now();
+            await upsertQdrantPoint(codeCollection, pointId, embedding, {
+              workspace_id: workspace.id, workspace_slug: workspace.slug, repository_id: repository.id,
+              repository_name: repository.name, source_type: "code", file_path: chunk.file.relativePath,
+              language: chunk.file.language, chunk_index: chunk.index, start_line: chunk.startLine, end_line: chunk.endLine
+            });
+            metrics.qdrant_write_ms += Date.now() - qdrantStartedAt;
+            const postgresStartedAt = Date.now();
+            await insertCodeChunk(workspace.id, repository.id, chunk, pointId);
+            metrics.postgres_write_ms += Date.now() - postgresStartedAt;
+            indexedChunks += 1;
+            metrics.chunks = indexedChunks;
+            await incrementIndexJob(jobId, { chunks: 1 });
+          } catch (chunkError) {
+            if (chunkError instanceof IndexCanceledError || chunkError.name === "AbortError") throw chunkError;
+            failedChunks.push({ index: originalChunk.index, error: String(chunkError?.message || "chunk_index_failed").slice(0, 300) });
+          }
         }
 
         await updateIndexJob(jobId, { phase: "symbols" });
+        const postgresStartedAt = Date.now();
         for (const symbol of analysis.symbols) {
           assertIndexNotCanceled(controller.signal);
           await insertCodeSymbol(workspace.id, repository.id, symbol);
@@ -1076,6 +1129,7 @@ async function indexRepository(workspace, repository) {
           assertIndexNotCanceled(controller.signal);
           await insertCodeRelationship(workspace.id, repository.id, relationship);
         }
+        metrics.postgres_write_ms += Date.now() - postgresStartedAt;
 
         indexedSymbols += analysis.symbols.length;
         indexedRelationships += analysis.relationships.length;
@@ -1088,10 +1142,13 @@ async function indexRepository(workspace, repository) {
             incremental: true,
             chunks: fileChunks.length,
             symbols: analysis.symbols.length,
-            relationships: analysis.relationships.length
+            relationships: analysis.relationships.length,
+            subchunks: fileChunks.filter((chunk) => chunk.metadata?.split_reason === "embedding_context_limit").length,
+            failed_chunks: failedChunks
           }
         });
         await incrementIndexJob(jobId, { files: 1 });
+        metrics.files = (metrics.files || 0) + 1;
       } catch (fileError) {
         if (fileError instanceof IndexCanceledError || fileError.name === "AbortError") {
           throw fileError;
@@ -1109,7 +1166,9 @@ async function indexRepository(workspace, repository) {
     await updateIndexJob(jobId, { phase: "graph", symbols: indexedSymbols });
     assertIndexNotCanceled(controller.signal);
     if (graphFiles.length) {
+      const neo4jStartedAt = Date.now();
       await upsertNeo4jRepository(workspace, repository, graphFiles, graphSymbols, graphRelationships);
+      metrics.neo4j_write_ms += Date.now() - neo4jStartedAt;
     }
     const resolutionSummary = await resolveWorkspaceRelationships(workspace.id);
     await syncResolvedRelationshipsToNeo4j(workspace.id);
@@ -1121,6 +1180,9 @@ async function indexRepository(workspace, repository) {
        WHERE id = $1`,
       [jobId, files.length, indexedChunks, indexedSymbols]
     );
+    metrics.files = files.length;
+    metrics.chunks = indexedChunks;
+    await persistMetrics();
 
     return {
       files: files.length,
@@ -1135,6 +1197,9 @@ async function indexRepository(workspace, repository) {
       unresolved_relationships: resolutionSummary.unresolved
     };
   } catch (error) {
+    metrics.files = metrics.files || 0;
+    metrics.chunks = metrics.chunks || 0;
+    await persistMetrics().catch((metricsError) => console.error("index metrics persistence failed", metricsError));
     if (error instanceof IndexCanceledError || error.name === "AbortError") {
       if (typeof activeFilePath === "string") {
         await cleanupFileIndex(repository.id, activeFilePath).catch((cleanupError) => console.error("file cleanup after canceled index failed", cleanupError));
@@ -1160,8 +1225,71 @@ async function indexRepository(workspace, repository) {
   }
 }
 
-function startRepositoryIndex(workspace, repository) {
-  indexRepository(workspace, repository)
+async function enqueueRepositoryIndex(workspace, repository, requestedBy = "admin-ui") {
+  const existingJob = await findActiveRepositoryIndex(repository.id);
+  if (existingJob) {
+    const error = new Error("repository_index_already_running");
+    error.status = 409;
+    throw error;
+  }
+  const result = await query(
+    `INSERT INTO code_index_jobs (repository_id, workspace_id, scope, status, phase, current_repository, priority, queue_position, requested_by)
+     VALUES ($1, $2, 'workspace', 'queued', 'queued', $3, 100,
+       (SELECT COALESCE(MAX(queue_position), 0) + 1 FROM code_index_jobs WHERE status IN ('queued', 'paused')), $4)
+     RETURNING id`,
+    [repository.id, workspace.id, repository.name, requestedBy]
+  );
+  void runIndexScheduler();
+  return result.rows[0].id;
+}
+
+async function getQueueSettings() {
+  const result = await query("SELECT paused, max_concurrent_repositories FROM code_index_queue_settings WHERE id = TRUE");
+  return result.rows[0] || { paused: false, max_concurrent_repositories: configuredIndexConcurrency };
+}
+
+let schedulerRunning = false;
+async function runIndexScheduler() {
+  if (schedulerRunning) return;
+  schedulerRunning = true;
+  try {
+    const settings = await getQueueSettings();
+    if (settings.paused) return;
+    const available = Math.max(0, Number(settings.max_concurrent_repositories) - activeIndexJobs.size);
+    for (let slot = 0; slot < available; slot += 1) {
+      const claimed = await query(
+        `WITH next_job AS (
+           SELECT j.id FROM code_index_jobs j
+           WHERE j.status = 'queued'
+             AND NOT EXISTS (SELECT 1 FROM code_index_jobs active WHERE active.repository_id = j.repository_id AND active.status IN ('running', 'canceling'))
+           ORDER BY j.priority ASC, j.queue_position ASC NULLS LAST, j.created_at ASC
+           FOR UPDATE SKIP LOCKED LIMIT 1
+         )
+         UPDATE code_index_jobs j SET status = 'running', phase = 'preparing', started_at = NOW(), started_after = NOW(), locked_at = NOW(), worker_id = $1
+         FROM next_job WHERE j.id = next_job.id
+         RETURNING j.id, j.repository_id, j.workspace_id`,
+        [`admin-${process.pid}`]
+      );
+      const job = claimed.rows[0];
+      if (!job) break;
+      const details = await query(
+        `SELECT w.id AS workspace_id, w.slug AS workspace_slug, w.name AS workspace_name,
+                r.id AS repository_id, r.name AS repository_name, r.local_path, r.url, r.default_branch, r.status, r.metadata
+         FROM code_index_jobs j JOIN workspaces w ON w.id = j.workspace_id JOIN repositories r ON r.id = j.repository_id WHERE j.id = $1`, [job.id]
+      );
+      const row = details.rows[0];
+      if (!row) continue;
+      const workspace = { id: row.workspace_id, slug: row.workspace_slug, name: row.workspace_name };
+      const repository = { id: row.repository_id, workspace_id: row.workspace_id, name: row.repository_name, local_path: row.local_path, url: row.url, default_branch: row.default_branch, status: row.status, metadata: row.metadata };
+      startRepositoryIndex(workspace, repository, job.id);
+    }
+  } finally {
+    schedulerRunning = false;
+  }
+}
+
+function startRepositoryIndex(workspace, repository, jobId) {
+  indexRepository(workspace, repository, jobId)
     .then(async (indexResult) => {
       await query(
         `UPDATE repositories
@@ -1192,7 +1320,7 @@ function startRepositoryIndex(workspace, repository) {
          WHERE id = $1`,
         [repository.id, JSON.stringify({ index_error: error instanceof Error ? error.message.slice(0, 1000) : "index_failed" })]
       ).catch((updateError) => console.error("repository index status update failed", updateError));
-    });
+    }).finally(() => void runIndexScheduler());
 }
 
 async function updateIndexJob(jobId, changes) {
@@ -1714,6 +1842,13 @@ async function collectIndexableFiles(rootPath) {
 
       const stat = await fs.stat(absolutePath);
       const relativePath = path.relative(root, absolutePath);
+      const normalizedRelativePath = relativePath.split(path.sep).join("/");
+      const isSnapshot = entry.name.endsWith("Snapshot.cs");
+      if (indexIgnoreMigrations && !isSnapshot && entry.name.endsWith(".cs") && /(^|\/)migrations\//i.test(normalizedRelativePath)) {
+        stats.skippedFiles += 1;
+        ignored.push({ absolutePath, relativePath, size: stat.size, language: "csharp", reason: "migration_file" });
+        continue;
+      }
       if (stat.size > maxIndexFileBytes) {
         stats.skippedFiles += 1;
         ignored.push({
@@ -1975,7 +2110,7 @@ async function analyzeCsharpWithRoslyn(content, file, signal) {
       language: file.language,
       content
     }),
-    signal: abortSignalWithTimeout(signal, 20_000)
+    signal: abortSignalWithTimeout(signal, roslynTimeoutMs)
   });
 
   if (!response.ok) {
@@ -2791,24 +2926,105 @@ function buildChunkEmbeddingText(chunk) {
   ].filter(Boolean).join("\n");
 }
 
+function splitChunksForEmbedding(chunks) {
+  const result = [];
+  let index = 0;
+  for (let parentChunkIndex = 0; parentChunkIndex < chunks.length; parentChunkIndex += 1) {
+    const chunk = chunks[parentChunkIndex];
+    const lines = chunk.content.split(/\r?\n/);
+    const needsSplit = chunk.content.length > embeddingContentMaxChars || lines.length > embeddingContentMaxLines;
+    if (!needsSplit) {
+      result.push({ ...chunk, index });
+      index += 1;
+      continue;
+    }
+    let start = 0;
+    let subchunkIndex = 0;
+    while (start < lines.length) {
+      let end = start;
+      let chars = 0;
+      while (end < lines.length && end - start < embeddingContentMaxLines) {
+        const next = lines[end];
+        if (end > start && chars + next.length + 1 > embeddingContentMaxChars) break;
+        chars += next.length + 1;
+        end += 1;
+        if (chars >= embeddingContentMaxChars) break;
+      }
+      if (end === start) end += 1;
+      const content = lines.slice(start, end).join("\n").trim();
+      if (content) {
+        result.push({
+          ...chunk,
+          index,
+          startLine: chunk.startLine + start,
+          endLine: chunk.startLine + end - 1,
+          content,
+          metadata: {
+            ...(chunk.metadata || {}),
+            split_reason: "embedding_context_limit",
+            parent_chunk_index: parentChunkIndex,
+            subchunk_index: subchunkIndex
+          }
+        });
+        index += 1;
+        subchunkIndex += 1;
+      }
+      start = end;
+    }
+  }
+  return result;
+}
+
+function isRetryableEmbeddingError(error) {
+  const message = String(error?.message || error).toLowerCase();
+  return error?.name === "TimeoutError" || error?.name === "AbortError" || message.includes("ollama_embedding_failed_500") || message.includes("timeout");
+}
+
+function isContextLimitError(error) {
+  const message = String(error?.message || error).toLowerCase();
+  return message.includes("input length exceeds the context length") || message.includes("embedding_input_exceeds_configured_limit");
+}
+
+function truncateChunkForEmbedding(chunk) {
+  const maxContentChars = Math.max(64, embeddingContentMaxChars - 128);
+  const content = chunk.content.slice(0, maxContentChars);
+  const retainedLines = content.split(/\r?\n/).length;
+  return {
+    ...chunk,
+    content,
+    endLine: Math.min(chunk.endLine, chunk.startLine + retainedLines - 1),
+    metadata: {
+      ...(chunk.metadata || {}),
+      truncated: true,
+      truncate_reason: "embedding_context_limit"
+    }
+  };
+}
+
 async function createEmbedding(text, signal) {
-  const response = await fetch(`${ollamaUrl}/api/embeddings`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model: embeddingModel, prompt: text }),
-    signal: abortSignalWithTimeout(signal, 60_000)
-  });
-
-  if (!response.ok) {
-    throw new Error(`ollama_embedding_failed_${response.status}: ${await response.text()}`);
+  if (text.length > embeddingMaxChars || text.split(/\r?\n/).length > embeddingMaxLines) {
+    throw new Error("embedding_input_exceeds_configured_limit");
   }
-
-  const body = await response.json();
-  if (!Array.isArray(body.embedding)) {
-    throw new Error("ollama_embedding_missing_vector");
+  let lastError;
+  for (let attempt = 0; attempt <= embeddingMaxRetries; attempt += 1) {
+    try {
+      const response = await fetch(`${ollamaUrl}/api/embeddings`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: embeddingModel, prompt: text }),
+        signal: abortSignalWithTimeout(signal, embeddingTimeoutMs)
+      });
+      if (!response.ok) throw new Error(`ollama_embedding_failed_${response.status}: ${await response.text()}`);
+      const body = await response.json();
+      if (!Array.isArray(body.embedding)) throw new Error("ollama_embedding_missing_vector");
+      return body.embedding;
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableEmbeddingError(error) || attempt === embeddingMaxRetries || signal?.aborted) break;
+      await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+    }
   }
-
-  return body.embedding;
+  throw lastError;
 }
 
 async function ensureQdrantCollection(collectionName) {
@@ -3223,7 +3439,7 @@ async function runNeo4jStatements(statements) {
       "authorization": `Basic ${Buffer.from(`neo4j:${neo4jPassword}`).toString("base64")}`
     },
     body: JSON.stringify({ statements }),
-    signal: AbortSignal.timeout(30_000)
+    signal: AbortSignal.timeout(neo4jTimeoutMs)
   });
 
   if (!response.ok) {
@@ -3300,13 +3516,13 @@ async function addRepository(workspaceIdOrSlug, payload) {
 
   const updated = await query(
     `UPDATE repositories
-     SET status = 'indexing', updated_at = NOW()
+     SET status = 'index_queued', updated_at = NOW()
      WHERE id = $1
      RETURNING id, workspace_id, name, provider, url, default_branch, local_path, status, metadata, created_at, updated_at`,
     [repository.id]
   );
 
-  startRepositoryIndex(workspace, updated.rows[0]);
+  await enqueueRepositoryIndex(workspace, updated.rows[0]);
   return updated.rows[0];
 }
 
@@ -3387,13 +3603,13 @@ async function reindexRepository(workspaceIdOrSlug, repositoryId) {
 
   const updated = await query(
     `UPDATE repositories
-     SET status = 'indexing', updated_at = NOW()
+     SET status = 'index_queued', updated_at = NOW()
      WHERE id = $1
      RETURNING id, workspace_id, name, provider, url, default_branch, local_path, status, metadata, created_at, updated_at`,
     [repository.id]
   );
 
-  startRepositoryIndex(workspace, updated.rows[0]);
+  await enqueueRepositoryIndex(workspace, updated.rows[0]);
   return updated.rows[0];
 }
 
@@ -3422,6 +3638,11 @@ async function cancelIndexJob(workspaceIdOrSlug, jobId) {
     const error = new Error("index_job_not_running");
     error.status = 409;
     throw error;
+  }
+
+  if (["queued", "paused"].includes(job.status)) {
+    await query("UPDATE code_index_jobs SET status = 'canceled', phase = 'canceled', finished_at = NOW() WHERE id = $1", [job.id]);
+    return { workspace, job: { ...job, status: "canceled", phase: "canceled" } };
   }
 
   await query(
@@ -3479,6 +3700,46 @@ async function cancelIndexJob(workspaceIdOrSlug, jobId) {
   );
 
   return { workspace, job: updated.rows[0] };
+}
+
+async function updateIndexJobQueue(workspaceIdOrSlug, jobId, action, payload = {}) {
+  const workspace = await getWorkspace(workspaceIdOrSlug);
+  if (!workspace) { const error = new Error("workspace_not_found"); error.status = 404; throw error; }
+  const result = await query("SELECT id, status, priority, queue_position FROM code_index_jobs WHERE id::text = $1 AND workspace_id = $2", [jobId, workspace.id]);
+  const job = result.rows[0];
+  if (!job) { const error = new Error("index_job_not_found"); error.status = 404; throw error; }
+  if (action === "pause") {
+    if (job.status !== "queued") { const error = new Error("only_queued_job_can_be_paused"); error.status = 409; throw error; }
+    await query("UPDATE code_index_jobs SET status = 'paused', phase = 'paused' WHERE id = $1", [job.id]);
+  } else if (action === "resume") {
+    if (job.status !== "paused") { const error = new Error("only_paused_job_can_be_resumed"); error.status = 409; throw error; }
+    await query("UPDATE code_index_jobs SET status = 'queued', phase = 'queued' WHERE id = $1", [job.id]);
+  } else if (action === "priority") {
+    const priority = Math.max(0, Math.min(1000, Number(payload.priority)));
+    if (!Number.isFinite(priority)) { const error = new Error("invalid_priority"); error.status = 400; throw error; }
+    await query("UPDATE code_index_jobs SET priority = $2 WHERE id = $1 AND status IN ('queued', 'paused')", [job.id, priority]);
+  } else if (["top", "up", "down"].includes(action)) {
+    if (job.status !== "queued") { const error = new Error("only_queued_job_can_be_reordered"); error.status = 409; throw error; }
+    if (action === "top") await query("UPDATE code_index_jobs SET queue_position = 0 WHERE id = $1", [job.id]);
+    else {
+      const operator = action === "up" ? "<" : ">";
+      const order = action === "up" ? "DESC" : "ASC";
+      const neighbor = await query(`SELECT id, queue_position FROM code_index_jobs WHERE workspace_id = $1 AND status = 'queued' AND queue_position ${operator} $2 ORDER BY queue_position ${order} LIMIT 1`, [workspace.id, job.queue_position]);
+      if (neighbor.rows[0]) await query("UPDATE code_index_jobs SET queue_position = CASE WHEN id = $1 THEN $2 WHEN id = $3 THEN $4 END WHERE id IN ($1, $3)", [job.id, neighbor.rows[0].queue_position, neighbor.rows[0].id, job.queue_position]);
+    }
+  } else { const error = new Error("invalid_queue_action"); error.status = 400; throw error; }
+  void runIndexScheduler();
+  return { workspace };
+}
+
+async function updateQueueSettings(payload) {
+  const paused = typeof payload.paused === "boolean" ? payload.paused : null;
+  const concurrent = payload.max_concurrent_repositories === undefined ? null : Math.min(3, Math.max(1, Number(payload.max_concurrent_repositories)));
+  if (concurrent !== null && !Number.isFinite(concurrent)) { const error = new Error("invalid_max_concurrent_repositories"); error.status = 400; throw error; }
+  await query(`UPDATE code_index_queue_settings SET paused = COALESCE($1, paused), max_concurrent_repositories = COALESCE($2, max_concurrent_repositories), updated_at = NOW() WHERE id = TRUE`, [paused, concurrent]);
+  const settings = await getQueueSettings();
+  if (!settings.paused) void runIndexScheduler();
+  return settings;
 }
 
 function inferRepoName(url) {
@@ -3750,6 +4011,21 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (url.pathname === "/api/index-queue" && req.method === "GET") {
+    sendJson(res, 200, await getQueueSettings());
+    return;
+  }
+  if (url.pathname === "/api/index-queue" && req.method === "PUT") {
+    sendJson(res, 200, await updateQueueSettings(await readBody(req)));
+    return;
+  }
+
+  const queueActionParams = routeMatch(url.pathname, "/api/workspaces/:workspace/index-jobs/:job/queue/:action");
+  if (queueActionParams && req.method === "POST") {
+    sendJson(res, 200, await updateIndexJobQueue(queueActionParams.workspace, queueActionParams.job, queueActionParams.action, await readBody(req)));
+    return;
+  }
+
   const cancelIndexJobParams = routeMatch(url.pathname, "/api/workspaces/:workspace/index-jobs/:job/cancel");
   if (cancelIndexJobParams && req.method === "POST") {
     sendJson(res, 200, await cancelIndexJob(cancelIndexJobParams.workspace, cancelIndexJobParams.job));
@@ -3813,6 +4089,8 @@ const server = http.createServer((req, res) => {
 
 ensureApplicationSchema()
   .then(() => {
+    void runIndexScheduler();
+    setInterval(() => void runIndexScheduler(), 2000).unref();
     server.listen(port, "0.0.0.0", () => {
       console.log(`admin listening on ${port}`);
     });
