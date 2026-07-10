@@ -31,6 +31,8 @@ Todas as chamadas de tool exigem:
 - `code.search_code`
 - `code.semantic_search_code`
 
+Na versao atual, `code.search_code`, `code.semantic_search_code`, `code.search_symbol`, `code.get_class`, `code.get_method` e `code.find_references` consultam os dados reais gerados pela indexacao de repositorios.
+
 ## Git MCP
 
 - `git.get_history`
@@ -41,4 +43,3 @@ Todas as chamadas de tool exigem:
 - `git.list_changed_files`
 - `git.find_commits_touching_symbol`
 - `git.search_commit_message`
-

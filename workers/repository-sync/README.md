@@ -1,6 +1,6 @@
 # repository-sync
 
-Responsavel por clonar e atualizar repositorios cadastrados. Na versao atual, a Admin UI ja consegue registrar repositorios e executar o clone inicial em `./data/repos/<workspace>/<repository>`.
+Responsavel por clonar e atualizar repositorios cadastrados. Na versao atual, a Admin UI ja consegue registrar repositorios, executar o clone inicial em `./data/repos/<workspace>/<repository>` e disparar uma primeira indexacao real.
 
 ## Entrada
 

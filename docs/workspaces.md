@@ -27,6 +27,8 @@ Filtros esperados:
 - Qdrant payload: `workspace_id`
 - Neo4j: `workspace_id`, `repository_id`, `branch`, `commit_sha`
 
+A indexacao pode ser disparada por repositorio, mas o indice pertence ao workspace. Repositorios diferentes do mesmo workspace podem ser relacionados no grafo e consultados em conjunto pelas tools MCP.
+
 ## Criacao
 
 Ao criar um workspace pela Admin UI:

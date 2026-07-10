@@ -1,7 +1,25 @@
 import http from "node:http";
+import pg from "pg";
+
+const { Pool } = pg;
 
 const port = Number(process.env.PORT || 7102);
 const serviceName = process.env.SERVICE_NAME || "code-mcp";
+const qdrantUrl = process.env.QDRANT_URI || "http://qdrant:6333";
+const qdrantApiKey = process.env.QDRANT_API_KEY || "";
+const ollamaUrl = process.env.OLLAMA_BASE_URL || "http://ollama:11434";
+const embeddingModel = process.env.EMBEDDING_MODEL || "nomic-embed-text";
+const codeCollection = "code_symbols";
+
+const pool = new Pool({
+  host: process.env.POSTGRES_HOST || "postgres",
+  port: Number(process.env.POSTGRES_INTERNAL_PORT || 5432),
+  database: process.env.POSTGRES_DB || "ai_platform",
+  user: process.env.POSTGRES_USER || "ai_platform",
+  password: process.env.POSTGRES_PASSWORD || undefined,
+  max: 8
+});
+
 const tools = [
   "code.search_symbol",
   "code.get_class",
@@ -48,16 +66,241 @@ function hasWorkspace(payload) {
   return Boolean(payload.workspace_id || payload.workspace_slug);
 }
 
-function executeTool(tool, payload) {
+async function query(sql, params = []) {
+  return pool.query(sql, params);
+}
+
+async function resolveWorkspace(payload) {
+  const result = await query(
+    "SELECT id, slug, name FROM workspaces WHERE id::text = $1 OR slug = $1",
+    [payload.workspace_id || payload.workspace_slug]
+  );
+
+  if (!result.rows[0]) {
+    const error = new Error("workspace_not_found");
+    error.status = 404;
+    throw error;
+  }
+
+  return result.rows[0];
+}
+
+async function executeTool(tool, payload) {
+  const workspace = await resolveWorkspace(payload);
+
+  if (tool === "code.search_code" || tool === "code.semantic_search_code") {
+    return searchCode(tool, workspace, payload);
+  }
+
+  if (tool === "code.search_symbol" || tool === "code.get_class" || tool === "code.get_method") {
+    return searchSymbols(tool, workspace, payload);
+  }
+
+  if (tool === "code.find_references") {
+    return searchCode(tool, workspace, { ...payload, query: payload.symbol || payload.query || payload.name });
+  }
+
   return {
     status: "ok",
     tool,
-    workspace: payload.workspace_id || payload.workspace_slug,
+    workspace: workspace.slug,
     repository_id: payload.repository_id || null,
     result: null,
     matches: [],
     relationships: [],
-    note: "Implementacao pendente: conecte PostgreSQL, Neo4j e Qdrant para retornar simbolos, referencias e impacto tecnico."
+    note: "Consulta real ainda limitada a chunks e simbolos indexados. Use code.search_code, code.semantic_search_code ou code.search_symbol."
+  };
+}
+
+async function searchCode(tool, workspace, payload) {
+  const text = String(payload.query || "").trim();
+  const limit = Math.min(Number(payload.limit || 8), 25);
+
+  if (!text) {
+    const error = new Error("query_required");
+    error.status = 400;
+    throw error;
+  }
+
+  let matches = [];
+  try {
+    const embedding = await createEmbedding(text);
+    const points = await searchQdrant(embedding, workspace.id, payload.repository_id, limit);
+    matches = await hydrateQdrantMatches(points);
+  } catch (error) {
+    matches = await searchChunksByText(workspace.id, payload.repository_id, text, limit);
+  }
+
+  return {
+    status: "ok",
+    tool,
+    workspace: workspace.slug,
+    repository_id: payload.repository_id || null,
+    query: text,
+    matches
+  };
+}
+
+async function searchSymbols(tool, workspace, payload) {
+  const search = String(payload.symbol || payload.name || payload.query || "").trim();
+  const limit = Math.min(Number(payload.limit || 20), 50);
+
+  if (!search) {
+    const error = new Error("symbol_query_required");
+    error.status = 400;
+    throw error;
+  }
+
+  const typeFilter = tool === "code.get_class"
+    ? ["class", "interface", "record", "struct"]
+    : tool === "code.get_method"
+      ? ["method", "function"]
+      : null;
+
+  const params = [workspace.id, `%${search}%`];
+  let typeSql = "";
+  if (typeFilter) {
+    params.push(typeFilter);
+    typeSql = "AND symbol_type = ANY($3)";
+  }
+  if (payload.repository_id) {
+    params.push(payload.repository_id);
+    typeSql += ` AND repository_id = $${params.length}`;
+  }
+  params.push(limit);
+
+  const result = await query(
+    `SELECT id, repository_id, symbol_type, name, full_name, language, file_path, start_line, end_line, metadata
+     FROM code_symbols
+     WHERE workspace_id = $1 AND (name ILIKE $2 OR full_name ILIKE $2)
+     ${typeSql}
+     ORDER BY
+       CASE WHEN lower(name) = lower($2) THEN 0 ELSE 1 END,
+       name ASC
+     LIMIT $${params.length}`,
+    params
+  );
+
+  return {
+    status: "ok",
+    tool,
+    workspace: workspace.slug,
+    repository_id: payload.repository_id || null,
+    query: search,
+    matches: result.rows
+  };
+}
+
+async function createEmbedding(text) {
+  const response = await fetch(`${ollamaUrl}/api/embeddings`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: embeddingModel, prompt: text }),
+    signal: AbortSignal.timeout(60_000)
+  });
+
+  if (!response.ok) {
+    throw new Error(`ollama_embedding_failed_${response.status}`);
+  }
+
+  const body = await response.json();
+  if (!Array.isArray(body.embedding)) {
+    throw new Error("ollama_embedding_missing_vector");
+  }
+
+  return body.embedding;
+}
+
+async function searchQdrant(vector, workspaceId, repositoryId, limit) {
+  const must = [
+    { key: "workspace_id", match: { value: workspaceId } }
+  ];
+  if (repositoryId) {
+    must.push({ key: "repository_id", match: { value: repositoryId } });
+  }
+
+  const response = await fetch(`${qdrantUrl}/collections/${codeCollection}/points/search`, {
+    method: "POST",
+    headers: qdrantHeaders(),
+    body: JSON.stringify({
+      vector,
+      limit,
+      with_payload: true,
+      filter: { must }
+    }),
+    signal: AbortSignal.timeout(15_000)
+  });
+
+  if (!response.ok) {
+    throw new Error(`qdrant_search_failed_${response.status}`);
+  }
+
+  const body = await response.json();
+  return body.result || [];
+}
+
+async function hydrateQdrantMatches(points) {
+  if (!points.length) {
+    return [];
+  }
+
+  const pointIds = points.map((point) => String(point.id));
+  const result = await query(
+    `SELECT id, repository_id, file_path, language, chunk_index, start_line, end_line, content, qdrant_point_id, metadata
+     FROM code_chunks
+     WHERE qdrant_point_id = ANY($1)`,
+    [pointIds]
+  );
+
+  const byPointId = new Map(result.rows.map((row) => [row.qdrant_point_id, row]));
+  return points
+    .map((point) => {
+      const row = byPointId.get(String(point.id));
+      if (!row) {
+        return null;
+      }
+
+      return {
+        score: point.score,
+        repository_id: row.repository_id,
+        file_path: row.file_path,
+        language: row.language,
+        chunk_index: row.chunk_index,
+        start_line: row.start_line,
+        end_line: row.end_line,
+        content: row.content,
+        metadata: row.metadata
+      };
+    })
+    .filter(Boolean);
+}
+
+async function searchChunksByText(workspaceId, repositoryId, text, limit) {
+  const params = [workspaceId, `%${text}%`];
+  let repoSql = "";
+  if (repositoryId) {
+    params.push(repositoryId);
+    repoSql = `AND repository_id = $${params.length}`;
+  }
+  params.push(limit);
+
+  const result = await query(
+    `SELECT id, repository_id, file_path, language, chunk_index, start_line, end_line, content, metadata
+     FROM code_chunks
+     WHERE workspace_id = $1 AND content ILIKE $2
+     ${repoSql}
+     ORDER BY file_path ASC, chunk_index ASC
+     LIMIT $${params.length}`,
+    params
+  );
+
+  return result.rows.map((row) => ({ score: null, ...row }));
+}
+
+function qdrantHeaders() {
+  return {
+    "content-type": "application/json",
+    ...(qdrantApiKey ? { "api-key": qdrantApiKey } : {})
   };
 }
 
@@ -91,13 +334,13 @@ async function handleRequest(req, res) {
     return;
   }
 
-  sendJson(res, 200, executeTool(tool, payload));
+  sendJson(res, 200, await executeTool(tool, payload));
 }
 
 http.createServer((req, res) => {
   handleRequest(req, res).catch((error) => {
     const message = error instanceof Error ? error.message : "internal_error";
-    sendJson(res, message === "invalid_json" ? 400 : 500, { error: message });
+    sendJson(res, error.status || (message === "invalid_json" ? 400 : 500), { error: message });
   });
 }).listen(port, "0.0.0.0", () => {
   console.log(`${serviceName} listening on ${port}`);

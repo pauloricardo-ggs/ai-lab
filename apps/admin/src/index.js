@@ -1,5 +1,6 @@
 import http from "node:http";
 import { spawn } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -16,6 +17,90 @@ const port = Number(process.env.PORT || 7600);
 const reposRoot = process.env.REPOS_ROOT || "/repos";
 const adminApiKey = process.env.ADMIN_API_KEY || "";
 const gatewayApiKey = process.env.GATEWAY_API_KEY || "";
+const qdrantUrl = process.env.QDRANT_URI || "http://qdrant:6333";
+const qdrantApiKey = process.env.QDRANT_API_KEY || "";
+const ollamaUrl = process.env.OLLAMA_BASE_URL || "http://ollama:11434";
+const embeddingModel = process.env.EMBEDDING_MODEL || "nomic-embed-text";
+const embeddingVectorSize = Number(process.env.EMBEDDING_VECTOR_SIZE || 768);
+const neo4jUrl = process.env.NEO4J_HTTP_URL || "http://neo4j:7474";
+const neo4jPassword = process.env.NEO4J_PASSWORD || "";
+const codeCollection = "code_symbols";
+
+const ignoredDirectories = new Set([
+  ".git",
+  "node_modules",
+  "bin",
+  "obj",
+  "dist",
+  "build",
+  ".next",
+  ".nuxt",
+  "coverage",
+  "target",
+  ".venv",
+  "venv"
+]);
+
+const ignoredFiles = new Set([
+  ".DS_Store",
+  "Thumbs.db",
+  ".npmrc",
+  ".pypirc"
+]);
+
+const languageByExtension = new Map([
+  [".cs", "csharp"],
+  [".vb", "vbnet"],
+  [".swift", "swift"],
+  [".js", "javascript"],
+  [".jsx", "javascript"],
+  [".ts", "typescript"],
+  [".tsx", "typescript"],
+  [".py", "python"],
+  [".java", "java"],
+  [".go", "go"],
+  [".rs", "rust"],
+  [".php", "php"],
+  [".rb", "ruby"],
+  [".md", "markdown"],
+  [".txt", "text"],
+  [".json", "json"],
+  [".yml", "yaml"],
+  [".yaml", "yaml"],
+  [".xml", "xml"],
+  [".plist", "xml"],
+  [".pbxproj", "xcode"],
+  [".xcscheme", "xml"],
+  [".xcsettings", "xml"],
+  [".xcworkspacedata", "xml"],
+  [".entitlements", "xml"],
+  [".html", "html"],
+  [".css", "css"],
+  [".sql", "sql"],
+  [".sh", "shell"]
+]);
+
+const languageByFilename = new Map([
+  ["dockerfile", "dockerfile"],
+  ["makefile", "makefile"],
+  ["license", "text"],
+  [".gitignore", "gitignore"],
+  [".dockerignore", "dockerignore"],
+  [".env.example", "dotenv"]
+]);
+
+const maxIndexFileBytes = 512 * 1024;
+const chunkLineSize = 120;
+const chunkLineOverlap = 20;
+const activeIndexJobs = new Map();
+const activeIndexStatuses = ["pending", "running", "canceling"];
+
+class IndexCanceledError extends Error {
+  constructor() {
+    super("index_canceled");
+    this.name = "IndexCanceledError";
+  }
+}
 
 const pool = new Pool({
   host: process.env.POSTGRES_HOST || "postgres",
@@ -295,6 +380,71 @@ async function query(sql, params = []) {
   return result;
 }
 
+async function ensureApplicationSchema() {
+  await query(`
+    CREATE TABLE IF NOT EXISTS code_chunks (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      repository_id UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+      file_path TEXT NOT NULL,
+      language TEXT NOT NULL,
+      chunk_index INTEGER NOT NULL,
+      start_line INTEGER,
+      end_line INTEGER,
+      content TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      qdrant_collection TEXT,
+      qdrant_point_id TEXT,
+      metadata JSONB NOT NULL DEFAULT '{}',
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      UNIQUE(repository_id, file_path, chunk_index)
+    )
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS code_index_jobs (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      repository_id UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+      workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      scope TEXT NOT NULL DEFAULT 'workspace',
+      status TEXT NOT NULL DEFAULT 'pending',
+      phase TEXT,
+      current_repository TEXT,
+      current_file TEXT,
+      total_files INTEGER NOT NULL DEFAULT 0,
+      files_indexed INTEGER NOT NULL DEFAULT 0,
+      total_repository_files INTEGER NOT NULL DEFAULT 0,
+      skipped_files INTEGER NOT NULL DEFAULT 0,
+      total_chunks INTEGER NOT NULL DEFAULT 0,
+      chunks_indexed INTEGER NOT NULL DEFAULT 0,
+      symbols_indexed INTEGER NOT NULL DEFAULT 0,
+      started_at TIMESTAMP,
+      finished_at TIMESTAMP,
+      error TEXT,
+      created_at TIMESTAMP NOT NULL DEFAULT NOW()
+    )
+  `);
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'workspace'");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS phase TEXT");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS current_repository TEXT");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS current_file TEXT");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS total_files INTEGER NOT NULL DEFAULT 0");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS files_indexed INTEGER NOT NULL DEFAULT 0");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS total_repository_files INTEGER NOT NULL DEFAULT 0");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS skipped_files INTEGER NOT NULL DEFAULT 0");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS total_chunks INTEGER NOT NULL DEFAULT 0");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS chunks_indexed INTEGER NOT NULL DEFAULT 0");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS symbols_indexed INTEGER NOT NULL DEFAULT 0");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS started_at TIMESTAMP");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS finished_at TIMESTAMP");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS error TEXT");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_chunks_workspace_id ON code_chunks(workspace_id)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_chunks_repository_id ON code_chunks(repository_id)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_chunks_file_path ON code_chunks(file_path)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_symbols_repository_id ON code_symbols(repository_id)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_index_jobs_repository_id ON code_index_jobs(repository_id)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_index_jobs_workspace_id ON code_index_jobs(workspace_id)");
+}
+
 async function listWorkspaces() {
   const result = await query(`
     SELECT
@@ -418,6 +568,84 @@ async function listRepositories(workspaceIdOrSlug) {
   return { workspace, repositories: result.rows };
 }
 
+async function listWorkspaceIndexJobs(workspaceIdOrSlug, options = {}) {
+  const workspace = await getWorkspace(workspaceIdOrSlug);
+  if (!workspace) {
+    const error = new Error("workspace_not_found");
+    error.status = 404;
+    throw error;
+  }
+
+  const requestedPage = Math.max(1, Number.parseInt(options.page || "1", 10) || 1);
+  const limit = Math.min(50, Math.max(1, Number.parseInt(options.limit || "10", 10) || 10));
+  const state = String(options.state || "all");
+  const where = ["j.workspace_id = $1"];
+  const params = [workspace.id];
+
+  if (state === "running") {
+    where.push("j.status = ANY($2::text[])");
+    params.push(activeIndexStatuses);
+  } else if (state === "finished") {
+    where.push("j.status <> ALL($2::text[])");
+    params.push(activeIndexStatuses);
+  }
+
+  const whereSql = where.join(" AND ");
+  const countResult = await query(
+    `SELECT COUNT(*)::int AS total
+     FROM code_index_jobs j
+     WHERE ${whereSql}`,
+    params
+  );
+
+  const total = Number(countResult.rows[0]?.total || 0);
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  const page = Math.min(requestedPage, totalPages);
+  const offset = (page - 1) * limit;
+  params.push(limit, offset);
+  const result = await query(
+    `SELECT
+       j.id,
+       j.repository_id,
+       r.name AS repository_name,
+       j.workspace_id,
+       j.scope,
+       j.status,
+       j.phase,
+       j.current_repository,
+       j.current_file,
+       j.total_files,
+       j.files_indexed,
+       j.total_repository_files,
+       j.skipped_files,
+       j.total_chunks,
+       j.chunks_indexed,
+       j.symbols_indexed,
+       j.started_at,
+       j.finished_at,
+       j.error,
+       j.created_at
+     FROM code_index_jobs j
+     LEFT JOIN repositories r ON r.id = j.repository_id
+     WHERE ${whereSql}
+     ORDER BY j.created_at DESC
+     LIMIT $${params.length - 1}
+     OFFSET $${params.length}`,
+    params
+  );
+
+  return {
+    workspace,
+    jobs: result.rows,
+    pagination: {
+      page,
+      limit,
+      total,
+      total_pages: totalPages
+    }
+  };
+}
+
 function runGitClone(url, branch, targetPath) {
   return new Promise((resolve, reject) => {
     const args = ["clone", "--depth", "1"];
@@ -471,6 +699,720 @@ function sanitizeSecret(value) {
   return String(value).replaceAll(token, "***");
 }
 
+async function findActiveRepositoryIndex(repositoryId) {
+  const result = await query(
+    `SELECT id, status, phase
+     FROM code_index_jobs
+     WHERE repository_id = $1
+       AND status = ANY($2::text[])
+     ORDER BY created_at DESC
+     LIMIT 1`,
+    [repositoryId, activeIndexStatuses]
+  );
+  return result.rows[0] || null;
+}
+
+function assertIndexNotCanceled(signal) {
+  if (signal?.aborted) {
+    throw new IndexCanceledError();
+  }
+}
+
+function abortSignalWithTimeout(signal, timeoutMs) {
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
+  if (!signal) {
+    return timeoutSignal;
+  }
+  return AbortSignal.any([signal, timeoutSignal]);
+}
+
+async function indexRepository(workspace, repository) {
+  const existingJob = await findActiveRepositoryIndex(repository.id);
+  if (existingJob) {
+    const error = new Error("repository_index_already_running");
+    error.status = 409;
+    throw error;
+  }
+
+  const controller = new AbortController();
+  const job = await query(
+    `INSERT INTO code_index_jobs (repository_id, workspace_id, scope, status, phase, current_repository, started_at)
+     VALUES ($1, $2, 'workspace', 'running', 'preparing', $3, NOW())
+     RETURNING id`,
+    [repository.id, workspace.id, repository.name]
+  );
+  const jobId = job.rows[0].id;
+  activeIndexJobs.set(jobId, { controller, repositoryId: repository.id, workspaceId: workspace.id });
+
+  try {
+    assertIndexNotCanceled(controller.signal);
+    await cleanupRepositoryIndex(repository.id);
+    assertIndexNotCanceled(controller.signal);
+    await ensureQdrantCollection(codeCollection);
+    assertIndexNotCanceled(controller.signal);
+    await ensureNeo4jSchema();
+
+    await updateIndexJob(jobId, { phase: "scanning" });
+    assertIndexNotCanceled(controller.signal);
+    const scan = await collectIndexableFiles(repository.local_path);
+    const files = scan.files;
+    const chunks = [];
+    const symbols = [];
+
+    await updateIndexJob(jobId, {
+      phase: "extracting",
+      totalFiles: files.length,
+      totalRepositoryFiles: scan.stats.totalFiles,
+      skippedFiles: scan.stats.skippedFiles
+    });
+    for (const file of files) {
+      assertIndexNotCanceled(controller.signal);
+      await updateIndexJob(jobId, { currentFile: file.relativePath });
+      const content = await fs.readFile(file.absolutePath, "utf8");
+      const fileChunks = chunkContent(content);
+      chunks.push(...fileChunks.map((chunk) => ({ ...chunk, file })));
+      symbols.push(...extractSymbols(content, file));
+      await incrementIndexJob(jobId, { files: 1 });
+    }
+
+    let indexedChunks = 0;
+    await updateIndexJob(jobId, { phase: "embedding", totalChunks: chunks.length, currentFile: null });
+    for (const chunk of chunks) {
+      assertIndexNotCanceled(controller.signal);
+      await updateIndexJob(jobId, { currentFile: chunk.file.relativePath });
+      const pointId = randomUUID();
+      const embedding = await createEmbedding(buildChunkEmbeddingText(chunk), controller.signal);
+      assertIndexNotCanceled(controller.signal);
+      await upsertQdrantPoint(codeCollection, pointId, embedding, {
+        workspace_id: workspace.id,
+        workspace_slug: workspace.slug,
+        repository_id: repository.id,
+        repository_name: repository.name,
+        source_type: "code",
+        file_path: chunk.file.relativePath,
+        language: chunk.file.language,
+        chunk_index: chunk.index,
+        start_line: chunk.startLine,
+        end_line: chunk.endLine
+      });
+      await query(
+        `INSERT INTO code_chunks (
+          workspace_id, repository_id, file_path, language, chunk_index,
+          start_line, end_line, content, content_hash, qdrant_collection, qdrant_point_id, metadata
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+        ON CONFLICT (repository_id, file_path, chunk_index)
+        DO UPDATE SET
+          content = EXCLUDED.content,
+          content_hash = EXCLUDED.content_hash,
+          qdrant_collection = EXCLUDED.qdrant_collection,
+          qdrant_point_id = EXCLUDED.qdrant_point_id,
+          metadata = EXCLUDED.metadata`,
+        [
+          workspace.id,
+          repository.id,
+          chunk.file.relativePath,
+          chunk.file.language,
+          chunk.index,
+          chunk.startLine,
+          chunk.endLine,
+          chunk.content,
+          sha256(chunk.content),
+          codeCollection,
+          pointId,
+          { indexed_by: "admin-ui", embedding_model: embeddingModel }
+        ]
+      );
+      indexedChunks += 1;
+      await incrementIndexJob(jobId, { chunks: 1 });
+    }
+
+    await updateIndexJob(jobId, { phase: "symbols", currentFile: null });
+    for (const symbol of symbols) {
+      assertIndexNotCanceled(controller.signal);
+      await query(
+        `INSERT INTO code_symbols (
+          workspace_id, repository_id, symbol_type, name, full_name, language,
+          file_path, start_line, end_line, metadata
+        )
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [
+          workspace.id,
+          repository.id,
+          symbol.type,
+          symbol.name,
+          symbol.fullName,
+          symbol.language,
+          symbol.filePath,
+          symbol.line,
+          symbol.line,
+          { indexed_by: "admin-ui" }
+        ]
+      );
+    }
+
+    await updateIndexJob(jobId, { phase: "graph", symbols: symbols.length });
+    assertIndexNotCanceled(controller.signal);
+    await upsertNeo4jRepository(workspace, repository, files, symbols);
+    assertIndexNotCanceled(controller.signal);
+    await query(
+      `UPDATE code_index_jobs
+       SET status = 'completed', phase = 'completed', current_file = NULL, files_indexed = $2, chunks_indexed = $3, symbols_indexed = $4, finished_at = NOW()
+       WHERE id = $1`,
+      [jobId, files.length, indexedChunks, symbols.length]
+    );
+
+    return { files: files.length, chunks: indexedChunks, symbols: symbols.length };
+  } catch (error) {
+    if (error instanceof IndexCanceledError || error.name === "AbortError") {
+      await cleanupRepositoryIndex(repository.id).catch((cleanupError) => console.error("repository canceled index cleanup failed", cleanupError));
+      await query(
+        `UPDATE code_index_jobs
+         SET status = 'canceled', phase = 'canceled', current_file = NULL, error = NULL, finished_at = NOW()
+         WHERE id = $1`,
+        [jobId]
+      );
+      throw new IndexCanceledError();
+    }
+
+    await query(
+      `UPDATE code_index_jobs
+       SET status = 'error', phase = 'error', error = $2, finished_at = NOW()
+       WHERE id = $1`,
+      [jobId, error instanceof Error ? error.message.slice(0, 2000) : "index_failed"]
+    );
+    throw error;
+  } finally {
+    activeIndexJobs.delete(jobId);
+  }
+}
+
+function startRepositoryIndex(workspace, repository) {
+  indexRepository(workspace, repository)
+    .then(async (indexResult) => {
+      await query(
+        `UPDATE repositories
+         SET status = 'indexed', metadata = metadata || $2::jsonb, updated_at = NOW()
+         WHERE id = $1`,
+        [repository.id, JSON.stringify({ index: indexResult })]
+      );
+    })
+    .catch(async (error) => {
+      console.error("repository index failed", error);
+      if (error instanceof IndexCanceledError || error.message === "index_canceled") {
+        await query(
+          `UPDATE repositories
+           SET status = 'index_canceled', metadata = metadata || $2::jsonb, updated_at = NOW()
+           WHERE id = $1`,
+          [repository.id, JSON.stringify({ index_canceled: new Date().toISOString() })]
+        ).catch((updateError) => console.error("repository canceled index status update failed", updateError));
+        return;
+      }
+
+      await query(
+        `UPDATE repositories
+         SET status = 'index_error', metadata = metadata || $2::jsonb, updated_at = NOW()
+         WHERE id = $1`,
+        [repository.id, JSON.stringify({ index_error: error instanceof Error ? error.message.slice(0, 1000) : "index_failed" })]
+      ).catch((updateError) => console.error("repository index status update failed", updateError));
+    });
+}
+
+async function updateIndexJob(jobId, changes) {
+  const assignments = [];
+  const params = [jobId];
+
+  const mapping = {
+    phase: "phase",
+    currentRepository: "current_repository",
+    currentFile: "current_file",
+    totalFiles: "total_files",
+    totalRepositoryFiles: "total_repository_files",
+    skippedFiles: "skipped_files",
+    totalChunks: "total_chunks",
+    symbols: "symbols_indexed"
+  };
+
+  for (const [key, column] of Object.entries(mapping)) {
+    if (Object.hasOwn(changes, key)) {
+      params.push(changes[key]);
+      assignments.push(`${column} = $${params.length}`);
+    }
+  }
+
+  if (!assignments.length) {
+    return;
+  }
+
+  await query(`UPDATE code_index_jobs SET ${assignments.join(", ")} WHERE id = $1`, params);
+}
+
+async function incrementIndexJob(jobId, increments) {
+  const assignments = [];
+  const params = [jobId];
+
+  if (increments.files) {
+    params.push(increments.files);
+    assignments.push(`files_indexed = files_indexed + $${params.length}`);
+  }
+  if (increments.chunks) {
+    params.push(increments.chunks);
+    assignments.push(`chunks_indexed = chunks_indexed + $${params.length}`);
+  }
+
+  if (!assignments.length) {
+    return;
+  }
+
+  await query(`UPDATE code_index_jobs SET ${assignments.join(", ")} WHERE id = $1`, params);
+}
+
+async function cleanupRepositoryIndex(repositoryId) {
+  await deleteQdrantRepositoryPoints(repositoryId);
+  await deleteNeo4jRepository(repositoryId);
+  await query("DELETE FROM code_symbols WHERE repository_id = $1", [repositoryId]);
+  await query("DELETE FROM code_chunks WHERE repository_id = $1", [repositoryId]);
+}
+
+async function collectIndexableFiles(rootPath) {
+  const root = path.resolve(rootPath);
+  const files = [];
+  const stats = {
+    totalFiles: 0,
+    skippedFiles: 0
+  };
+
+  async function visit(currentPath) {
+    const entries = await fs.readdir(currentPath, { withFileTypes: true });
+    for (const entry of entries) {
+      const absolutePath = path.join(currentPath, entry.name);
+      if (entry.isDirectory()) {
+        if (!ignoredDirectories.has(entry.name)) {
+          await visit(absolutePath);
+        }
+        continue;
+      }
+
+      if (!entry.isFile()) {
+        continue;
+      }
+
+      stats.totalFiles += 1;
+
+      const stat = await fs.stat(absolutePath);
+      if (stat.size > maxIndexFileBytes) {
+        stats.skippedFiles += 1;
+        continue;
+      }
+
+      const language = await inferFileLanguage(absolutePath, entry.name);
+      if (!language) {
+        stats.skippedFiles += 1;
+        continue;
+      }
+
+      files.push({
+        absolutePath,
+        relativePath: path.relative(root, absolutePath),
+        language,
+        size: stat.size
+      });
+    }
+  }
+
+  await visit(root);
+  return { files, stats };
+}
+
+async function inferFileLanguage(absolutePath, fileName) {
+  const normalizedName = fileName.toLowerCase();
+  if (ignoredFiles.has(fileName) || ignoredFiles.has(normalizedName)) {
+    return null;
+  }
+
+  if (normalizedName.startsWith(".env") && normalizedName !== ".env.example") {
+    return null;
+  }
+
+  const byFilename = languageByFilename.get(normalizedName);
+  if (byFilename) {
+    return byFilename;
+  }
+
+  const extension = path.extname(fileName).toLowerCase();
+  const byExtension = languageByExtension.get(extension);
+  if (byExtension) {
+    return byExtension;
+  }
+
+  if (await looksLikeTextFile(absolutePath)) {
+    return "text";
+  }
+
+  return null;
+}
+
+async function looksLikeTextFile(absolutePath) {
+  const handle = await fs.open(absolutePath, "r");
+  try {
+    const buffer = Buffer.alloc(4096);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    if (bytesRead === 0) {
+      return true;
+    }
+
+    const sample = buffer.subarray(0, bytesRead);
+    let controlBytes = 0;
+    for (const byte of sample) {
+      if (byte === 0) {
+        return false;
+      }
+      const isAllowedControl = byte === 9 || byte === 10 || byte === 12 || byte === 13;
+      if (byte < 32 && !isAllowedControl) {
+        controlBytes += 1;
+      }
+    }
+
+    return controlBytes / bytesRead < 0.08;
+  } finally {
+    await handle.close();
+  }
+}
+
+function chunkContent(content) {
+  const lines = content.split(/\r?\n/);
+  const chunks = [];
+  let index = 0;
+
+  for (let start = 0; start < lines.length; start += chunkLineSize - chunkLineOverlap) {
+    const end = Math.min(lines.length, start + chunkLineSize);
+    const chunkLines = lines.slice(start, end);
+    const chunkText = chunkLines.join("\n").trim();
+    if (chunkText) {
+      chunks.push({
+        index,
+        startLine: start + 1,
+        endLine: end,
+        content: chunkText
+      });
+      index += 1;
+    }
+    if (end === lines.length) {
+      break;
+    }
+  }
+
+  return chunks;
+}
+
+function extractSymbols(content, file) {
+  const patterns = symbolPatterns(file.language);
+  const lines = content.split(/\r?\n/);
+  const symbols = [];
+
+  lines.forEach((line, index) => {
+    for (const pattern of patterns) {
+      const match = line.match(pattern.regex);
+      if (match?.[pattern.group]) {
+        const name = match[pattern.group];
+        symbols.push({
+          type: pattern.type,
+          name,
+          fullName: `${file.relativePath}#${name}`,
+          language: file.language,
+          filePath: file.relativePath,
+          line: index + 1
+        });
+      }
+    }
+  });
+
+  return symbols;
+}
+
+function symbolPatterns(language) {
+  const commonJs = [
+    { type: "class", group: 1, regex: /^\s*(?:export\s+)?class\s+([A-Za-z_$][\w$]*)/ },
+    { type: "function", group: 1, regex: /^\s*(?:export\s+)?(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/ },
+    { type: "function", group: 1, regex: /^\s*(?:export\s+)?const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?\(/ }
+  ];
+
+  const byLanguage = {
+    csharp: [
+      { type: "class", group: 1, regex: /^\s*(?:public|private|internal|protected)?\s*(?:sealed|abstract|static)?\s*class\s+([A-Za-z_]\w*)/ },
+      { type: "interface", group: 1, regex: /^\s*(?:public|private|internal)?\s*interface\s+([A-Za-z_]\w*)/ },
+      { type: "record", group: 1, regex: /^\s*(?:public|private|internal)?\s*record\s+([A-Za-z_]\w*)/ },
+      { type: "method", group: 1, regex: /^\s*(?:public|private|internal|protected)?\s*(?:static\s+)?(?:async\s+)?[\w<>\[\],?]+\s+([A-Za-z_]\w*)\s*\(/ }
+    ],
+    javascript: commonJs,
+    typescript: commonJs,
+    swift: [
+      { type: "class", group: 1, regex: /^\s*(?:open|public|internal|fileprivate|private)?\s*(?:final\s+)?class\s+([A-Za-z_]\w*)/ },
+      { type: "struct", group: 1, regex: /^\s*(?:public|internal|fileprivate|private)?\s*struct\s+([A-Za-z_]\w*)/ },
+      { type: "enum", group: 1, regex: /^\s*(?:public|internal|fileprivate|private)?\s*enum\s+([A-Za-z_]\w*)/ },
+      { type: "protocol", group: 1, regex: /^\s*(?:public|internal|fileprivate|private)?\s*protocol\s+([A-Za-z_]\w*)/ },
+      { type: "actor", group: 1, regex: /^\s*(?:public|internal|fileprivate|private)?\s*actor\s+([A-Za-z_]\w*)/ },
+      { type: "function", group: 1, regex: /^\s*(?:open|public|internal|fileprivate|private)?\s*(?:static\s+)?func\s+([A-Za-z_]\w*)\s*\(/ }
+    ],
+    python: [
+      { type: "class", group: 1, regex: /^\s*class\s+([A-Za-z_]\w*)/ },
+      { type: "function", group: 1, regex: /^\s*def\s+([A-Za-z_]\w*)\s*\(/ },
+      { type: "function", group: 1, regex: /^\s*async\s+def\s+([A-Za-z_]\w*)\s*\(/ }
+    ],
+    java: [
+      { type: "class", group: 1, regex: /^\s*(?:public|private|protected)?\s*(?:abstract|final)?\s*class\s+([A-Za-z_]\w*)/ },
+      { type: "interface", group: 1, regex: /^\s*(?:public|private|protected)?\s*interface\s+([A-Za-z_]\w*)/ },
+      { type: "method", group: 1, regex: /^\s*(?:public|private|protected)?\s*(?:static\s+)?[\w<>\[\],?]+\s+([A-Za-z_]\w*)\s*\(/ }
+    ],
+    go: [
+      { type: "function", group: 1, regex: /^\s*func\s+(?:\([^)]+\)\s*)?([A-Za-z_]\w*)\s*\(/ },
+      { type: "struct", group: 1, regex: /^\s*type\s+([A-Za-z_]\w*)\s+struct\b/ },
+      { type: "interface", group: 1, regex: /^\s*type\s+([A-Za-z_]\w*)\s+interface\b/ }
+    ],
+    rust: [
+      { type: "function", group: 1, regex: /^\s*(?:pub\s+)?fn\s+([A-Za-z_]\w*)\s*\(/ },
+      { type: "struct", group: 1, regex: /^\s*(?:pub\s+)?struct\s+([A-Za-z_]\w*)/ },
+      { type: "enum", group: 1, regex: /^\s*(?:pub\s+)?enum\s+([A-Za-z_]\w*)/ }
+    ]
+  };
+
+  return byLanguage[language] || [];
+}
+
+function buildChunkEmbeddingText(chunk) {
+  return [
+    `Repository file: ${chunk.file.relativePath}`,
+    `Language: ${chunk.file.language}`,
+    `Lines: ${chunk.startLine}-${chunk.endLine}`,
+    chunk.content
+  ].join("\n");
+}
+
+async function createEmbedding(text, signal) {
+  const response = await fetch(`${ollamaUrl}/api/embeddings`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ model: embeddingModel, prompt: text }),
+    signal: abortSignalWithTimeout(signal, 60_000)
+  });
+
+  if (!response.ok) {
+    throw new Error(`ollama_embedding_failed_${response.status}: ${await response.text()}`);
+  }
+
+  const body = await response.json();
+  if (!Array.isArray(body.embedding)) {
+    throw new Error("ollama_embedding_missing_vector");
+  }
+
+  return body.embedding;
+}
+
+async function ensureQdrantCollection(collectionName) {
+  const current = await fetch(`${qdrantUrl}/collections/${collectionName}`, {
+    headers: qdrantHeaders()
+  });
+  if (current.ok) {
+    const body = await current.json();
+    const currentSize = body.result?.config?.params?.vectors?.size;
+    if (currentSize && Number(currentSize) !== embeddingVectorSize) {
+      throw new Error(`qdrant_collection_vector_size_mismatch: ${collectionName} has ${currentSize}, expected ${embeddingVectorSize}`);
+    }
+    return;
+  }
+
+  const response = await fetch(`${qdrantUrl}/collections/${collectionName}`, {
+    method: "PUT",
+    headers: qdrantHeaders(),
+    body: JSON.stringify({
+      vectors: {
+        size: embeddingVectorSize,
+        distance: "Cosine"
+      }
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`qdrant_collection_failed_${response.status}: ${await response.text()}`);
+  }
+}
+
+async function upsertQdrantPoint(collectionName, pointId, vector, payload) {
+  const response = await fetch(`${qdrantUrl}/collections/${collectionName}/points?wait=true`, {
+    method: "PUT",
+    headers: qdrantHeaders(),
+    body: JSON.stringify({
+      points: [
+        {
+          id: pointId,
+          vector,
+          payload
+        }
+      ]
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`qdrant_upsert_failed_${response.status}: ${await response.text()}`);
+  }
+}
+
+async function deleteQdrantRepositoryPoints(repositoryId) {
+  const response = await fetch(`${qdrantUrl}/collections/${codeCollection}/points/delete?wait=true`, {
+    method: "POST",
+    headers: qdrantHeaders(),
+    body: JSON.stringify({
+      filter: {
+        must: [
+          { key: "repository_id", match: { value: repositoryId } }
+        ]
+      }
+    })
+  });
+
+  if (![200, 404].includes(response.status)) {
+    throw new Error(`qdrant_delete_failed_${response.status}: ${await response.text()}`);
+  }
+}
+
+function qdrantHeaders() {
+  return {
+    "content-type": "application/json",
+    ...(qdrantApiKey ? { "api-key": qdrantApiKey } : {})
+  };
+}
+
+async function ensureNeo4jSchema() {
+  if (!neo4jPassword) {
+    return;
+  }
+
+  await runNeo4jStatements([
+    { statement: "CREATE CONSTRAINT repo_id IF NOT EXISTS FOR (r:Repository) REQUIRE r.id IS UNIQUE" },
+    { statement: "CREATE CONSTRAINT file_key IF NOT EXISTS FOR (f:CodeFile) REQUIRE f.key IS UNIQUE" },
+    { statement: "CREATE CONSTRAINT symbol_key IF NOT EXISTS FOR (s:CodeSymbol) REQUIRE s.key IS UNIQUE" }
+  ]);
+}
+
+async function upsertNeo4jRepository(workspace, repository, files, symbols) {
+  if (!neo4jPassword) {
+    return;
+  }
+
+  const statements = [
+    {
+      statement: `
+        MERGE (w:Workspace {id: $workspaceId})
+        SET w.slug = $workspaceSlug, w.name = $workspaceName
+        MERGE (r:Repository {id: $repositoryId})
+        SET r.name = $repositoryName, r.url = $repositoryUrl, r.workspace_id = $workspaceId
+        MERGE (w)-[:CONTAINS]->(r)
+      `,
+      parameters: {
+        workspaceId: workspace.id,
+        workspaceSlug: workspace.slug,
+        workspaceName: workspace.name,
+        repositoryId: repository.id,
+        repositoryName: repository.name,
+        repositoryUrl: repository.url
+      }
+    },
+    ...files.map((file) => ({
+      statement: `
+        MATCH (r:Repository {id: $repositoryId})
+        MERGE (f:CodeFile {key: $fileKey})
+        SET f.path = $filePath, f.language = $language, f.repository_id = $repositoryId, f.workspace_id = $workspaceId
+        MERGE (r)-[:CONTAINS]->(f)
+      `,
+      parameters: {
+        workspaceId: workspace.id,
+        repositoryId: repository.id,
+        fileKey: `${repository.id}:${file.relativePath}`,
+        filePath: file.relativePath,
+        language: file.language
+      }
+    })),
+    ...symbols.map((symbol) => ({
+      statement: `
+        MATCH (f:CodeFile {key: $fileKey})
+        MERGE (s:CodeSymbol {key: $symbolKey})
+        SET s.name = $name, s.type = $type, s.language = $language, s.file_path = $filePath,
+            s.repository_id = $repositoryId, s.workspace_id = $workspaceId, s.line = $line
+        MERGE (f)-[:DECLARES]->(s)
+      `,
+      parameters: {
+        workspaceId: workspace.id,
+        repositoryId: repository.id,
+        fileKey: `${repository.id}:${symbol.filePath}`,
+        symbolKey: `${repository.id}:${symbol.filePath}:${symbol.name}:${symbol.line}`,
+        name: symbol.name,
+        type: symbol.type,
+        language: symbol.language,
+        filePath: symbol.filePath,
+        line: symbol.line
+      }
+    })),
+    {
+      statement: `
+        MATCH (w:Workspace {id: $workspaceId})-[:CONTAINS]->(:Repository)-[:CONTAINS]->(:CodeFile)-[:DECLARES]->(a:CodeSymbol)
+        MATCH (w)-[:CONTAINS]->(:Repository)-[:CONTAINS]->(:CodeFile)-[:DECLARES]->(b:CodeSymbol)
+        WHERE a.repository_id <> b.repository_id
+          AND a.name = b.name
+          AND elementId(a) < elementId(b)
+        MERGE (a)-[:RELATED_SYMBOL {reason: 'same_name_cross_repository'}]->(b)
+      `,
+      parameters: {
+        workspaceId: workspace.id
+      }
+    }
+  ];
+
+  await runNeo4jStatements(statements);
+}
+
+async function deleteNeo4jRepository(repositoryId) {
+  if (!neo4jPassword) {
+    return;
+  }
+
+  await runNeo4jStatements([
+    {
+      statement: `
+        MATCH (r:Repository {id: $repositoryId})
+        OPTIONAL MATCH (r)-[:CONTAINS]->(f:CodeFile)
+        OPTIONAL MATCH (f)-[:DECLARES]->(s:CodeSymbol)
+        DETACH DELETE s, f, r
+      `,
+      parameters: { repositoryId }
+    }
+  ]);
+}
+
+async function runNeo4jStatements(statements) {
+  const response = await fetch(`${neo4jUrl}/db/neo4j/tx/commit`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "authorization": `Basic ${Buffer.from(`neo4j:${neo4jPassword}`).toString("base64")}`
+    },
+    body: JSON.stringify({ statements }),
+    signal: AbortSignal.timeout(30_000)
+  });
+
+  if (!response.ok) {
+    throw new Error(`neo4j_request_failed_${response.status}: ${await response.text()}`);
+  }
+
+  const body = await response.json();
+  if (body.errors?.length) {
+    throw new Error(`neo4j_statement_failed: ${JSON.stringify(body.errors).slice(0, 1000)}`);
+  }
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
 async function addRepository(workspaceIdOrSlug, payload) {
   const workspace = await getWorkspace(workspaceIdOrSlug);
   if (!workspace) {
@@ -518,14 +1460,6 @@ async function addRepository(workspaceIdOrSlug, payload) {
 
   try {
     await runGitClone(url, defaultBranch, targetPath);
-    const updated = await query(
-      `UPDATE repositories
-       SET status = 'active', updated_at = NOW()
-       WHERE id = $1
-       RETURNING id, workspace_id, name, provider, url, default_branch, local_path, status, metadata, created_at, updated_at`,
-      [repository.id]
-    );
-    return updated.rows[0];
   } catch (error) {
     await query(
       `UPDATE repositories
@@ -536,6 +1470,17 @@ async function addRepository(workspaceIdOrSlug, payload) {
     await fs.rm(targetPath, { recursive: true, force: true });
     throw error;
   }
+
+  const updated = await query(
+    `UPDATE repositories
+     SET status = 'indexing', updated_at = NOW()
+     WHERE id = $1
+     RETURNING id, workspace_id, name, provider, url, default_branch, local_path, status, metadata, created_at, updated_at`,
+    [repository.id]
+  );
+
+  startRepositoryIndex(workspace, updated.rows[0]);
+  return updated.rows[0];
 }
 
 async function deleteRepository(workspaceIdOrSlug, repositoryId) {
@@ -558,6 +1503,13 @@ async function deleteRepository(workspaceIdOrSlug, repositoryId) {
     throw error;
   }
 
+  const activeJob = await findActiveRepositoryIndex(repository.id);
+  if (activeJob) {
+    const error = new Error("repository_index_already_running");
+    error.status = 409;
+    throw error;
+  }
+
   if (repository.local_path) {
     const resolved = path.resolve(repository.local_path);
     const root = path.resolve(reposRoot);
@@ -566,8 +1518,140 @@ async function deleteRepository(workspaceIdOrSlug, repositoryId) {
     }
   }
 
+  await cleanupRepositoryIndex(repository.id);
   await query("DELETE FROM repositories WHERE id = $1", [repository.id]);
   return { deleted: true };
+}
+
+async function reindexRepository(workspaceIdOrSlug, repositoryId) {
+  const workspace = await getWorkspace(workspaceIdOrSlug);
+  if (!workspace) {
+    const error = new Error("workspace_not_found");
+    error.status = 404;
+    throw error;
+  }
+
+  const result = await query(
+    `SELECT id, workspace_id, name, provider, url, default_branch, local_path, status, metadata, created_at, updated_at
+     FROM repositories
+     WHERE id::text = $1 AND workspace_id = $2`,
+    [repositoryId, workspace.id]
+  );
+
+  const repository = result.rows[0];
+  if (!repository) {
+    const error = new Error("repository_not_found");
+    error.status = 404;
+    throw error;
+  }
+
+  if (!repository.local_path || !existsSync(repository.local_path)) {
+    const error = new Error("repository_local_path_not_found");
+    error.status = 404;
+    throw error;
+  }
+
+  const activeJob = await findActiveRepositoryIndex(repository.id);
+  if (activeJob) {
+    const error = new Error("repository_index_already_running");
+    error.status = 409;
+    throw error;
+  }
+
+  const updated = await query(
+    `UPDATE repositories
+     SET status = 'indexing', updated_at = NOW()
+     WHERE id = $1
+     RETURNING id, workspace_id, name, provider, url, default_branch, local_path, status, metadata, created_at, updated_at`,
+    [repository.id]
+  );
+
+  startRepositoryIndex(workspace, updated.rows[0]);
+  return updated.rows[0];
+}
+
+async function cancelIndexJob(workspaceIdOrSlug, jobId) {
+  const workspace = await getWorkspace(workspaceIdOrSlug);
+  if (!workspace) {
+    const error = new Error("workspace_not_found");
+    error.status = 404;
+    throw error;
+  }
+
+  const result = await query(
+    `SELECT id, repository_id, workspace_id, status, phase
+     FROM code_index_jobs
+     WHERE id::text = $1 AND workspace_id = $2`,
+    [jobId, workspace.id]
+  );
+  const job = result.rows[0];
+  if (!job) {
+    const error = new Error("index_job_not_found");
+    error.status = 404;
+    throw error;
+  }
+
+  if (!activeIndexStatuses.includes(job.status)) {
+    const error = new Error("index_job_not_running");
+    error.status = 409;
+    throw error;
+  }
+
+  await query(
+    `UPDATE code_index_jobs
+     SET status = 'canceling', phase = 'canceling', error = NULL
+     WHERE id = $1`,
+    [job.id]
+  );
+
+  const activeJob = activeIndexJobs.get(job.id);
+  if (activeJob) {
+    activeJob.controller.abort();
+  } else {
+    await cleanupRepositoryIndex(job.repository_id).catch((cleanupError) => console.error("stale canceled index cleanup failed", cleanupError));
+    await query(
+      `UPDATE code_index_jobs
+       SET status = 'canceled', phase = 'canceled', current_file = NULL, finished_at = NOW()
+       WHERE id = $1`,
+      [job.id]
+    );
+    await query(
+      `UPDATE repositories
+       SET status = 'index_canceled', metadata = metadata || $2::jsonb, updated_at = NOW()
+       WHERE id = $1`,
+      [job.repository_id, JSON.stringify({ index_canceled: new Date().toISOString() })]
+    );
+  }
+
+  const updated = await query(
+    `SELECT
+       j.id,
+       j.repository_id,
+       r.name AS repository_name,
+       j.workspace_id,
+       j.scope,
+       j.status,
+       j.phase,
+       j.current_repository,
+       j.current_file,
+       j.total_files,
+       j.files_indexed,
+       j.total_repository_files,
+       j.skipped_files,
+       j.total_chunks,
+       j.chunks_indexed,
+       j.symbols_indexed,
+       j.started_at,
+       j.finished_at,
+       j.error,
+       j.created_at
+     FROM code_index_jobs j
+     LEFT JOIN repositories r ON r.id = j.repository_id
+     WHERE j.id = $1`,
+    [job.id]
+  );
+
+  return { workspace, job: updated.rows[0] };
 }
 
 function inferRepoName(url) {
@@ -829,7 +1913,28 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  const indexJobsParams = routeMatch(url.pathname, "/api/workspaces/:workspace/index-jobs");
+  if (indexJobsParams && req.method === "GET") {
+    sendJson(res, 200, await listWorkspaceIndexJobs(indexJobsParams.workspace, {
+      state: url.searchParams.get("state") || "all",
+      page: url.searchParams.get("page") || "1",
+      limit: url.searchParams.get("limit") || "10"
+    }));
+    return;
+  }
+
+  const cancelIndexJobParams = routeMatch(url.pathname, "/api/workspaces/:workspace/index-jobs/:job/cancel");
+  if (cancelIndexJobParams && req.method === "POST") {
+    sendJson(res, 200, await cancelIndexJob(cancelIndexJobParams.workspace, cancelIndexJobParams.job));
+    return;
+  }
+
   const repoParams = routeMatch(url.pathname, "/api/workspaces/:workspace/repositories/:repository");
+  if (repoParams && req.method === "POST") {
+    sendJson(res, 200, { repository: await reindexRepository(repoParams.workspace, repoParams.repository) });
+    return;
+  }
+
   if (repoParams && req.method === "DELETE") {
     sendJson(res, 200, await deleteRepository(repoParams.workspace, repoParams.repository));
     return;
@@ -866,11 +1971,20 @@ async function handleRequest(req, res) {
   await serveStatic(req, res, url.pathname);
 }
 
-http.createServer((req, res) => {
+const server = http.createServer((req, res) => {
   handleRequest(req, res).catch((error) => {
     console.error(error);
     sendJson(res, 500, { error: "internal_error" });
   });
-}).listen(port, "0.0.0.0", () => {
-  console.log(`admin listening on ${port}`);
 });
+
+ensureApplicationSchema()
+  .then(() => {
+    server.listen(port, "0.0.0.0", () => {
+      console.log(`admin listening on ${port}`);
+    });
+  })
+  .catch((error) => {
+    console.error("admin schema initialization failed", error);
+    process.exit(1);
+  });

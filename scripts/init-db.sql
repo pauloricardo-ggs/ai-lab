@@ -86,6 +86,46 @@ CREATE TABLE IF NOT EXISTS code_symbols (
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS code_chunks (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    repository_id UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+    file_path TEXT NOT NULL,
+    language TEXT NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    start_line INTEGER,
+    end_line INTEGER,
+    content TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    qdrant_collection TEXT,
+    qdrant_point_id TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE(repository_id, file_path, chunk_index)
+);
+
+CREATE TABLE IF NOT EXISTS code_index_jobs (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    repository_id UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    scope TEXT NOT NULL DEFAULT 'workspace',
+    status TEXT NOT NULL DEFAULT 'pending',
+    phase TEXT,
+    current_repository TEXT,
+    current_file TEXT,
+    total_files INTEGER NOT NULL DEFAULT 0,
+    files_indexed INTEGER NOT NULL DEFAULT 0,
+    total_repository_files INTEGER NOT NULL DEFAULT 0,
+    skipped_files INTEGER NOT NULL DEFAULT 0,
+    total_chunks INTEGER NOT NULL DEFAULT 0,
+    chunks_indexed INTEGER NOT NULL DEFAULT 0,
+    symbols_indexed INTEGER NOT NULL DEFAULT 0,
+    started_at TIMESTAMP,
+    finished_at TIMESTAMP,
+    error TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS mcp_audit_logs (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     workspace_id UUID REFERENCES workspaces(id) ON DELETE SET NULL,
@@ -102,4 +142,9 @@ CREATE INDEX IF NOT EXISTS idx_repositories_workspace_id ON repositories(workspa
 CREATE INDEX IF NOT EXISTS idx_code_symbols_workspace_id ON code_symbols(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_code_symbols_name ON code_symbols(name);
 CREATE INDEX IF NOT EXISTS idx_code_symbols_full_name ON code_symbols(full_name);
-
+CREATE INDEX IF NOT EXISTS idx_code_symbols_repository_id ON code_symbols(repository_id);
+CREATE INDEX IF NOT EXISTS idx_code_chunks_workspace_id ON code_chunks(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_code_chunks_repository_id ON code_chunks(repository_id);
+CREATE INDEX IF NOT EXISTS idx_code_chunks_file_path ON code_chunks(file_path);
+CREATE INDEX IF NOT EXISTS idx_code_index_jobs_repository_id ON code_index_jobs(repository_id);
+CREATE INDEX IF NOT EXISTS idx_code_index_jobs_workspace_id ON code_index_jobs(workspace_id);

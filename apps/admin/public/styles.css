@@ -43,6 +43,11 @@ button {
   cursor: pointer;
 }
 
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
 .shell {
   display: grid;
   grid-template-columns: 280px minmax(0, 1fr);
@@ -309,6 +314,11 @@ button {
   grid-template-columns: minmax(360px, 0.9fr) minmax(0, 1.1fr);
 }
 
+.admin-workspaces-panel,
+.workspace-detail-panel {
+  max-width: 1280px;
+}
+
 .panel {
   padding: 22px;
 }
@@ -321,12 +331,24 @@ button {
   margin-bottom: 18px;
 }
 
+.compact-header {
+  margin-bottom: 12px;
+}
+
 .panel h2 {
   font-size: 24px;
 }
 
 .panel h3 {
   margin: 20px 0 12px;
+}
+
+.detail-badges {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 input,
@@ -381,6 +403,12 @@ textarea:focus {
   background: rgba(255, 107, 122, 0.1);
   border-color: rgba(255, 107, 122, 0.38);
   color: #ffd8dd;
+}
+
+.small-button {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
 }
 
 .form-grid {
@@ -458,6 +486,129 @@ textarea:focus {
 .status-pill.warning {
   color: var(--warn);
   border-color: rgba(248, 195, 99, 0.42);
+}
+
+.index-progress {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(8, 11, 18, 0.34);
+  padding: 16px;
+}
+
+.workspace-section {
+  margin-top: 22px;
+}
+
+.job-list {
+  display: grid;
+  gap: 12px;
+}
+
+.index-job {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(17, 24, 39, 0.58);
+  padding: 14px;
+}
+
+.index-job.compact {
+  background: rgba(8, 11, 18, 0.32);
+}
+
+.index-job header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+
+.job-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.index-job header strong,
+.index-job header span {
+  display: block;
+}
+
+.index-job header div span,
+.job-meta span,
+.progress-row span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.job-meta {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) repeat(6, minmax(76px, 0.38fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.job-meta div {
+  min-width: 0;
+}
+
+.job-meta strong,
+.job-meta div > span:last-child {
+  display: block;
+  color: var(--text);
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progress-row {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.progress-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.16);
+}
+
+.progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width 220ms ease;
+}
+
+.job-error {
+  border: 1px solid rgba(255, 107, 122, 0.3);
+  border-radius: 8px;
+  background: rgba(255, 107, 122, 0.08);
+  color: #ffd8dd;
+  font-size: 12px;
+  line-height: 1.45;
+  margin-top: 12px;
+  padding: 10px;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.pagination span {
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .repo-form {
@@ -614,7 +765,9 @@ code,
   .service-grid,
   .metric-grid,
   .form-grid.compact,
-  .repo-form {
+  .repo-form,
+  .job-meta,
+  .progress-row {
     grid-template-columns: 1fr;
   }
 }

@@ -83,8 +83,8 @@
         </section>
 
         <section id="view-admin" class="view">
-          <div class="split-layout">
-            <section class="panel">
+          <div id="adminWorkspaceListScreen">
+            <section class="panel admin-workspaces-panel">
               <div class="panel-header">
                 <div>
                   <p class="eyebrow">Admin Panel</p>
@@ -102,14 +102,20 @@
 
               <div id="workspaceList" class="list"></div>
             </section>
+          </div>
 
-            <section class="panel">
+          <div id="workspaceDetailScreen" class="hidden">
+            <section class="panel workspace-detail-panel">
               <div class="panel-header">
                 <div>
-                  <p class="eyebrow">Repositorios</p>
+                  <button id="backToWorkspaces" class="secondary-button" type="button">Voltar</button>
+                  <p class="eyebrow">Workspace</p>
                   <h2 id="selectedWorkspaceTitle">Selecione um workspace</h2>
                 </div>
-                <span id="selectedWorkspaceSlug" class="code-chip">workspace</span>
+                <div class="detail-badges">
+                  <span id="selectedWorkspaceSlug" class="code-chip">workspace</span>
+                  <span id="workspaceDetailRepoCount" class="status-pill muted">0 repos</span>
+                </div>
               </div>
 
               <div id="repoEmptyState" class="empty-state">
@@ -134,7 +140,38 @@
                   <button class="primary-button" type="submit">Adicionar e clonar</button>
                 </form>
 
-                <div id="repoList" class="table-wrap"></div>
+                <section class="workspace-section">
+                  <div class="panel-header compact-header">
+                    <div>
+                      <p class="eyebrow">Repositorios</p>
+                      <h3>Repositorios do workspace</h3>
+                    </div>
+                  </div>
+                  <div id="repoList" class="table-wrap"></div>
+                </section>
+
+                <section class="index-progress workspace-section">
+                  <div class="panel-header compact-header">
+                    <div>
+                      <p class="eyebrow">Indexacao</p>
+                      <h3>Rodando agora</h3>
+                    </div>
+                    <span id="indexSummary" class="status-pill muted">Sem jobs</span>
+                  </div>
+                  <div id="indexRunningList" class="job-list"></div>
+                </section>
+
+                <section class="workspace-section">
+                  <div class="panel-header compact-header">
+                    <div>
+                      <p class="eyebrow">Historico</p>
+                      <h3>Indexacoes finalizadas</h3>
+                    </div>
+                    <span id="indexHistorySummary" class="status-pill muted">0 jobs</span>
+                  </div>
+                  <div id="indexHistoryList" class="job-list compact-jobs"></div>
+                  <div id="indexPagination" class="pagination"></div>
+                </section>
               </div>
             </section>
           </div>

@@ -165,8 +165,11 @@ A Admin UI e o portal operacional da plataforma. Ela oferece:
 - dashboard de containers e status de runtime
 - criacao/listagem/remocao de workspaces
 - criacao automatica da pasta `data/repos/<workspace_slug>`
-- listagem de repositorios por workspace
+- tela de detalhe por workspace com repositorios e indexacoes
 - adicao de repositorios GitHub com clone automatico
+- indexacao automatica de codigo por workspace apos o clone
+- acompanhamento em tempo real do progresso de indexacao do workspace e historico paginado
+- bloqueio de reindexacao concorrente no mesmo repositorio e cancelamento de jobs ativos
 - remocao do registro e da pasta clonada do repositorio
 
 Para listar repositorios GitHub pela interface, configure `GITHUB_TOKEN` no `.env`. Para restringir a uma organizacao/owner por padrao, configure `GITHUB_OWNER`.
@@ -228,6 +231,28 @@ docker exec -it ai-ollama ollama pull nomic-embed-text
 Para trocar modelos, edite `LOCAL_CHAT_MODEL` e `EMBEDDING_MODEL` no `.env` antes de executar o install, ou rode `docker exec -it ai-ollama ollama pull <modelo>` manualmente depois.
 
 O Open WebUI responde aos usuarios usando os modelos locais configurados. Quando os MCPs responderem a agentes externos, eles tambem devem consultar apenas dados indexados localmente e modelos locais quando precisarem de inferencia no servidor.
+
+## Indexacao de Repositorios
+
+Ao adicionar um repositorio pela Admin UI, a plataforma inicia a indexacao em background:
+
+1. clona o repositorio em `data/repos/<workspace_slug>/<repository>`
+2. escaneia arquivos de codigo/texto suportados, incluindo Swift/Xcode
+3. divide o conteudo em chunks
+4. gera embeddings locais com Ollama usando `EMBEDDING_MODEL`
+5. grava chunks em `code_chunks`
+6. grava simbolos simples em `code_symbols`
+7. salva vetores no Qdrant na collection `code_symbols`
+8. cria nos e relacionamentos no Neo4j sob o no `Workspace`
+9. marca o repositorio como `indexed` ao concluir
+
+O repositorio e a unidade de ingestao, mas o escopo do indice e do grafo e sempre o workspace. Isso permite consultar e relacionar repositorios diferentes dentro do mesmo workspace. O grafo usa `Workspace -> Repository -> CodeFile -> CodeSymbol` e cria relacoes `RELATED_SYMBOL` entre simbolos de mesmo nome em repositorios diferentes do workspace.
+
+Enquanto a indexacao esta rodando, o status fica `indexing`. A Admin UI mostra o job do workspace em tempo real, incluindo fase atual, arquivo em processamento, total de arquivos do repositorio, arquivos indexaveis, arquivos ignorados, chunks processados e erros. Se houver falha, fica `index_error` e o repositorio pode ser reindexado pelo botao `Reindexar` na Admin UI.
+
+A plataforma nao permite iniciar outra reindexacao para um repositorio que ja tenha job ativo. Jobs em execucao podem ser cancelados na tela do workspace; ao cancelar, o job fica `canceled` e o repositorio fica `index_canceled`.
+
+As tools `code.search_code`, `code.semantic_search_code`, `code.search_symbol`, `code.get_class`, `code.get_method` e `code.find_references` ja consultam os dados indexados por workspace.
 
 ## Seguranca
 

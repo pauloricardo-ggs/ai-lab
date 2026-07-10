@@ -17,6 +17,8 @@
 
 Toda consulta deve receber `workspace_id` ou `workspace_slug`. Nenhum MCP deve retornar dados fora do workspace solicitado.
 
+Repositorios sao unidades de ingestao, mas nao sao a fronteira do conhecimento. O indice vetorial, as tabelas tecnicas e o grafo carregam `workspace_id`, permitindo que repositorios do mesmo workspace sejam consultados e relacionados entre si.
+
 ## Admin UI e Open WebUI
 
 A Admin UI e a fonte operacional para workspaces corporativos e repositorios tecnicos. Ao criar um workspace nela, a plataforma grava a tabela `workspaces` e cria `data/repos/<workspace_slug>`.
