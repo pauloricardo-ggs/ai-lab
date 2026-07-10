@@ -1,0 +1,218 @@
+services:
+  postgres:
+    image: ${POSTGRES_IMAGE}
+    container_name: ai-postgres
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./data/postgres/db:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/init-db.sql:ro
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - ai-platform
+
+  qdrant:
+    image: ${QDRANT_IMAGE}
+    container_name: ai-qdrant
+    restart: unless-stopped
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY}
+    volumes:
+      - ./data/qdrant:/qdrant/storage
+    ports:
+      - "${QDRANT_HTTP_PORT}:6333"
+      - "${QDRANT_GRPC_PORT}:6334"
+    networks:
+      - ai-platform
+
+  ollama:
+    image: ${OLLAMA_IMAGE}
+    container_name: ai-ollama
+    restart: unless-stopped
+    volumes:
+      - ./data/ollama:/root/.ollama
+    ports:
+      - "${OLLAMA_PORT}:11434"
+    networks:
+      - ai-platform
+
+  neo4j:
+    image: ${NEO4J_IMAGE}
+    container_name: ai-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD}
+      NEO4J_PLUGINS: '["apoc"]'
+    volumes:
+      - ./data/neo4j/data:/data
+      - ./data/neo4j/logs:/logs
+      - ./data/neo4j/import:/var/lib/neo4j/import
+      - ./data/neo4j/plugins:/plugins
+    ports:
+      - "${NEO4J_HTTP_PORT}:7474"
+      - "${NEO4J_BOLT_PORT}:7687"
+    networks:
+      - ai-platform
+
+  open-webui:
+    image: ${OPEN_WEBUI_IMAGE}
+    container_name: ai-open-webui
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      WEBUI_SECRET_KEY: ${OPEN_WEBUI_SECRET_KEY}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      OLLAMA_BASE_URL: http://ollama:11434
+      VECTOR_DB: qdrant
+      QDRANT_URI: http://qdrant:6333
+      QDRANT_API_KEY: ${QDRANT_API_KEY}
+    volumes:
+      - ./data/open-webui:/app/backend/data
+    ports:
+      - "${OPEN_WEBUI_PORT}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      ollama:
+        condition: service_started
+    networks:
+      - ai-platform
+
+  admin:
+    build:
+      context: ./apps/admin
+      args:
+        NODE_IMAGE: ${NODE_IMAGE}
+    container_name: ai-admin
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PORT: 7600
+      POSTGRES_HOST: postgres
+      POSTGRES_INTERNAL_PORT: 5432
+      REPOS_ROOT: /repos
+    volumes:
+      - ./data/repos:/repos
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "${ADMIN_PORT}:7600"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      open-webui:
+        condition: service_started
+      qdrant:
+        condition: service_started
+      ollama:
+        condition: service_started
+      neo4j:
+        condition: service_started
+      gateway:
+        condition: service_started
+    networks:
+      - ai-platform
+
+  gateway:
+    build:
+      context: ./apps/gateway
+      args:
+        NODE_IMAGE: ${NODE_IMAGE}
+    container_name: ai-mcp-gateway
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PORT: 7000
+      KNOWLEDGE_MCP_URL: http://knowledge-mcp:7101
+      CODE_MCP_URL: http://code-mcp:7102
+      GIT_MCP_URL: http://git-mcp:7103
+    ports:
+      - "${MCP_GATEWAY_PORT}:7000"
+    depends_on:
+      - knowledge-mcp
+      - code-mcp
+      - git-mcp
+    networks:
+      - ai-platform
+
+  knowledge-mcp:
+    build:
+      context: ./apps/knowledge-mcp
+      args:
+        NODE_IMAGE: ${NODE_IMAGE}
+    container_name: ai-knowledge-mcp
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PORT: 7101
+      SERVICE_NAME: knowledge-mcp
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    networks:
+      - ai-platform
+
+  code-mcp:
+    build:
+      context: ./apps/code-mcp
+      args:
+        NODE_IMAGE: ${NODE_IMAGE}
+    container_name: ai-code-mcp
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PORT: 7102
+      SERVICE_NAME: code-mcp
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+      neo4j:
+        condition: service_started
+    networks:
+      - ai-platform
+
+  git-mcp:
+    build:
+      context: ./apps/git-mcp
+      args:
+        NODE_IMAGE: ${NODE_IMAGE}
+    container_name: ai-git-mcp
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      PORT: 7103
+      SERVICE_NAME: git-mcp
+      REPOS_ROOT: /repos
+    volumes:
+      - ./data/repos:/repos
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - ai-platform
+
+networks:
+  ai-platform:
+    driver: bridge

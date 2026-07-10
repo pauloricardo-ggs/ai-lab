@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AI Knowledge Platform</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <a class="brand" href="/" data-route="dashboard">
+          <span class="brand-mark">AI</span>
+          <span>
+            <strong>Knowledge</strong>
+            <small>Platform Console</small>
+          </span>
+        </a>
+
+        <nav class="nav">
+          <a href="/" data-route="dashboard" class="active">Dashboard</a>
+          <a href="/admin" data-route="admin">Admin Panel</a>
+          <a href="/services/mcp-gateway" data-route="mcp">MCP Gateway</a>
+        </nav>
+
+        <section class="sidebar-panel">
+          <label for="adminKey">Admin API key</label>
+          <div class="inline-control">
+            <input id="adminKey" type="password" placeholder="Opcional">
+            <button id="saveAdminKey" class="icon-button" title="Salvar chave">OK</button>
+          </div>
+          <p>Use quando `ADMIN_API_KEY` estiver configurada no ambiente.</p>
+        </section>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">AI Knowledge Platform</p>
+            <h1 id="pageTitle">Dashboard</h1>
+          </div>
+          <div class="topbar-actions">
+            <span id="globalStatus" class="status-pill muted">Carregando</span>
+            <button id="refreshButton" class="secondary-button">Atualizar</button>
+          </div>
+        </header>
+
+        <section id="view-dashboard" class="view active">
+          <div class="hero-band">
+            <div>
+              <p class="eyebrow">Operacao centralizada</p>
+              <h2>Servicos, conhecimento e codigo em um unico painel.</h2>
+              <p>Monitore a stack, abra interfaces operacionais e configure o acesso MCP para agentes de desenvolvimento.</p>
+            </div>
+            <div class="metric-grid">
+              <div>
+                <strong id="onlineCount">0</strong>
+                <span>online</span>
+              </div>
+              <div>
+                <strong id="workspaceCount">0</strong>
+                <span>workspaces</span>
+              </div>
+              <div>
+                <strong id="repoCount">0</strong>
+                <span>repositorios</span>
+              </div>
+            </div>
+          </div>
+
+          <div id="serviceGrid" class="service-grid"></div>
+
+          <section class="panel dashboard-panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Runtime</p>
+                <h2>Containers</h2>
+              </div>
+              <span id="containerSummary" class="status-pill muted">Carregando</span>
+            </div>
+            <div id="containerList" class="table-wrap"></div>
+          </section>
+        </section>
+
+        <section id="view-admin" class="view">
+          <div class="split-layout">
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Admin Panel</p>
+                  <h2>Workspaces</h2>
+                </div>
+                <button id="newWorkspaceButton" class="primary-button">Novo workspace</button>
+              </div>
+
+              <form id="workspaceForm" class="form-grid compact hidden">
+                <input id="workspaceName" placeholder="Nome do workspace" required>
+                <input id="workspaceSlug" placeholder="slug-opcional">
+                <input id="workspaceDescription" placeholder="Descricao">
+                <button class="primary-button" type="submit">Criar</button>
+              </form>
+
+              <div id="workspaceList" class="list"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Repositorios</p>
+                  <h2 id="selectedWorkspaceTitle">Selecione um workspace</h2>
+                </div>
+                <span id="selectedWorkspaceSlug" class="code-chip">workspace</span>
+              </div>
+
+              <div id="repoEmptyState" class="empty-state">
+                Selecione ou crie um workspace para gerenciar repositorios.
+              </div>
+
+              <div id="repoManager" class="hidden">
+                <div class="repo-toolbar">
+                  <div class="inline-control wide">
+                    <input id="githubOwner" placeholder="usuario/org opcional; vazio lista repos do token">
+                    <button id="loadGithubRepos" class="secondary-button">Listar GitHub</button>
+                  </div>
+                </div>
+
+                <form id="repoForm" class="repo-form">
+                  <select id="remoteRepoSelect">
+                    <option value="">Selecionar repo listado ou informar manualmente</option>
+                  </select>
+                  <input id="repoName" placeholder="Nome do repo">
+                  <input id="repoUrl" placeholder="URL de clone HTTPS ou SSH">
+                  <input id="repoBranch" placeholder="Branch" value="main">
+                  <button class="primary-button" type="submit">Adicionar e clonar</button>
+                </form>
+
+                <div id="repoList" class="table-wrap"></div>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section id="view-mcp" class="view">
+          <div class="split-layout mcp-layout">
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Developer Console</p>
+                  <h2>MCP Gateway</h2>
+                </div>
+                <span id="mcpStatus" class="status-pill muted">Verificando</span>
+              </div>
+
+              <div class="info-stack">
+                <div>
+                  <span>Base URL</span>
+                  <code id="mcpBaseUrl">-</code>
+                </div>
+                <div>
+                  <span>Header</span>
+                  <code>x-api-key: &lt;GATEWAY_API_KEY&gt;</code>
+                </div>
+                <div>
+                  <span>Workspace</span>
+                  <code>workspace_id ou workspace_slug no payload</code>
+                </div>
+              </div>
+
+              <pre id="mcpConfigExample" class="code-block"></pre>
+
+              <h3>Tools disponiveis</h3>
+              <div id="toolList" class="tool-list"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header">
+                <div>
+                  <p class="eyebrow">Tool Tester</p>
+                  <h2>Executar tool</h2>
+                </div>
+              </div>
+
+              <form id="toolTestForm" class="tool-form">
+                <label>
+                  Tool
+                  <select id="toolSelect"></select>
+                </label>
+                <label>
+                  Workspace
+                  <select id="toolWorkspaceSelect"></select>
+                </label>
+                <label>
+                  Payload JSON
+                  <textarea id="toolPayload" spellcheck="false">{
+  "query": "politica de reembolso"
+}</textarea>
+                </label>
+                <button class="primary-button" type="submit">Executar</button>
+              </form>
+
+              <pre id="toolResponse" class="response-block">Aguardando execucao.</pre>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast" class="toast hidden"></div>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>
