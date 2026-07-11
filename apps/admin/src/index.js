@@ -785,7 +785,7 @@ async function getRepositoryIndexReport(workspaceIdOrSlug, repositoryId) {
   const latestJob = await query(
     `SELECT id, status, phase, total_files, files_indexed, total_repository_files,
             skipped_files, total_chunks, chunks_indexed, symbols_indexed,
-            started_at, finished_at, error, created_at
+            started_at, finished_at, error, metrics, created_at
      FROM code_index_jobs
      WHERE repository_id = $1
      ORDER BY created_at DESC
@@ -805,7 +805,7 @@ async function getRepositoryIndexReport(workspaceIdOrSlug, repositoryId) {
     relationships_by_resolution: relationshipsByResolution.rows,
     relationships_by_language: relationshipsByLanguage.rows,
     file_issues: fileIssues.rows,
-    latest_job: latestJob.rows[0] || null
+    latest_job: latestJob.rows[0] ? enrichIndexJobTelemetry(latestJob.rows[0]) : null
   };
 }
 
@@ -843,6 +843,13 @@ async function listWorkspaceIndexJobs(workspaceIdOrSlug, options = {}) {
   const totalPages = Math.max(1, Math.ceil(total / limit));
   const page = Math.min(requestedPage, totalPages);
   const offset = (page - 1) * limit;
+  const orderSql = state === "running"
+    ? `CASE j.status WHEN 'running' THEN 0 WHEN 'canceling' THEN 1 WHEN 'queued' THEN 2 WHEN 'paused' THEN 3 ELSE 4 END ASC,
+       CASE WHEN j.status IN ('running', 'canceling') THEN j.started_at END ASC NULLS LAST,
+       CASE WHEN j.status = 'queued' THEN j.priority END ASC NULLS LAST,
+       CASE WHEN j.status = 'queued' THEN j.queue_position END ASC NULLS LAST,
+       j.created_at ASC`
+    : "j.created_at DESC";
   params.push(limit, offset);
   const result = await query(
     `SELECT
@@ -873,7 +880,7 @@ async function listWorkspaceIndexJobs(workspaceIdOrSlug, options = {}) {
      FROM code_index_jobs j
      LEFT JOIN repositories r ON r.id = j.repository_id
      WHERE ${whereSql}
-     ORDER BY j.created_at DESC
+     ORDER BY ${orderSql}
      LIMIT $${params.length - 1}
      OFFSET $${params.length}`,
     params
@@ -881,13 +888,50 @@ async function listWorkspaceIndexJobs(workspaceIdOrSlug, options = {}) {
 
   return {
     workspace,
-    jobs: result.rows,
+    jobs: result.rows.map(enrichIndexJobTelemetry),
     queue: await getQueueSettings(),
     pagination: {
       page,
       limit,
       total,
       total_pages: totalPages
+    }
+  };
+}
+
+function enrichIndexJobTelemetry(job) {
+  const now = Date.now();
+  const startedAt = job.started_at ? Date.parse(job.started_at) : null;
+  const finishedAt = job.finished_at ? Date.parse(job.finished_at) : null;
+  const elapsedMs = startedAt ? Math.max(0, (finishedAt || now) - startedAt) : 0;
+  const elapsedMinutes = elapsedMs / 60000;
+  const filesDone = Number(job.files_indexed || 0);
+  const filesTotal = Number(job.total_files || 0);
+  const chunksDone = Number(job.chunks_indexed || 0);
+  const filesPerMinute = elapsedMinutes > 0 ? Number((filesDone / elapsedMinutes).toFixed(2)) : 0;
+  const chunksPerMinute = elapsedMinutes > 0 ? Number((chunksDone / elapsedMinutes).toFixed(2)) : 0;
+  const remainingFiles = filesTotal > 0 ? Math.max(filesTotal - filesDone, 0) : null;
+  let progressPercent = filesTotal > 0 ? Number(Math.min(100, (filesDone / filesTotal) * 100).toFixed(1)) : 0;
+  const pipeline = job.metrics?.pipeline || {};
+  const stageWeights = { scan: 2, files: 35, embeddings: 35, graph_write: 10, relationship_resolution: 9, graph_sync: 7, symbol_linking: 2 };
+  if (Object.keys(pipeline).length) {
+    progressPercent = Number(Object.entries(stageWeights).reduce((sum, [key, weight]) => {
+      const stage = pipeline[key] || {};
+      const stageProgress = stage.status === "completed" ? 100 : Number(stage.progress_percent || 0);
+      return sum + (Math.min(100, stageProgress) * weight / 100);
+    }, 0).toFixed(1));
+  }
+
+  return {
+    ...job,
+    telemetry: {
+      observed_at: new Date(now).toISOString(),
+      elapsed_ms: elapsedMs,
+      progress_percent: progressPercent,
+      files_per_minute: filesPerMinute,
+      chunks_per_minute: chunksPerMinute,
+      remaining_files: remainingFiles,
+      stages: pipeline
     }
   };
 }
@@ -976,13 +1020,36 @@ async function indexRepository(workspace, repository, jobId) {
   const controller = new AbortController();
   activeIndexJobs.set(jobId, { controller, repositoryId: repository.id, workspaceId: workspace.id });
   let activeFilePath = null;
-  const metrics = { scan_ms: 0, parsing_ms: 0, embedding_ms: 0, qdrant_write_ms: 0, postgres_write_ms: 0, neo4j_write_ms: 0, started_at: new Date().toISOString() };
+  const metrics = { scan_ms: 0, parsing_ms: 0, embedding_ms: 0, qdrant_write_ms: 0, postgres_write_ms: 0, neo4j_write_ms: 0, started_at: new Date().toISOString(), pipeline: {} };
+  let lastStagePersistAt = 0;
   const persistMetrics = async () => {
     metrics.total_ms = Date.now() - Date.parse(metrics.started_at);
     metrics.files_per_second = metrics.total_ms ? Number(((metrics.files || 0) / (metrics.total_ms / 1000)).toFixed(2)) : 0;
     metrics.chunks_per_minute = metrics.total_ms ? Number(((metrics.chunks || 0) / (metrics.total_ms / 60000)).toFixed(2)) : 0;
     metrics.average_embedding_ms = metrics.chunks ? Math.round(metrics.embedding_ms / metrics.chunks) : 0;
     await query("UPDATE code_index_jobs SET metrics = $2::jsonb WHERE id = $1", [jobId, JSON.stringify(metrics)]);
+  };
+  const updateStage = async (key, changes, persist = true) => {
+    const previous = metrics.pipeline[key] || {};
+    const now = Date.now();
+    const startedAt = previous.started_at || (changes.status === "running" ? new Date(now).toISOString() : null);
+    const done = Number(changes.done ?? previous.done ?? 0);
+    const total = Number(changes.total ?? previous.total ?? 0);
+    const elapsedMs = startedAt ? Math.max(0, now - Date.parse(startedAt)) : Number(previous.elapsed_ms || 0);
+    metrics.pipeline[key] = {
+      ...previous,
+      ...changes,
+      done,
+      total,
+      started_at: startedAt,
+      elapsed_ms: elapsedMs,
+      progress_percent: total > 0 ? Number(Math.min(100, (done / total) * 100).toFixed(1)) : changes.status === "completed" ? 100 : 0
+    };
+    const shouldPersist = persist && (changes.status === "completed" || now - lastStagePersistAt >= 750);
+    if (shouldPersist) {
+      lastStagePersistAt = now;
+      await persistMetrics();
+    }
   };
 
   try {
@@ -992,10 +1059,12 @@ async function indexRepository(workspace, repository, jobId) {
     await ensureNeo4jSchema();
 
     await updateIndexJob(jobId, { phase: "scanning" });
+    await updateStage("scan", { label: "Mapeando repositório", status: "running", done: 0, total: 1 });
     assertIndexNotCanceled(controller.signal);
     const scanStartedAt = Date.now();
     const scan = await collectIndexableFiles(repository.local_path);
     metrics.scan_ms = Date.now() - scanStartedAt;
+    await updateStage("scan", { status: "completed", done: 1, total: 1 });
     const files = scan.files;
     const previousFiles = await listRepositoryIndexFiles(repository.id);
     const hasFileInventory = previousFiles.size > 0;
@@ -1033,6 +1102,8 @@ async function indexRepository(workspace, repository, jobId) {
       totalRepositoryFiles: scan.stats.totalFiles,
       skippedFiles: scan.stats.skippedFiles
     });
+    await updateStage("files", { label: "Analisando arquivos", status: "running", done: 0, total: files.length });
+    await updateStage("embeddings", { label: "Gerando embeddings", status: "pending", done: 0, total: 0 });
 
     const graphFiles = [];
     const graphSymbols = [];
@@ -1057,6 +1128,8 @@ async function indexRepository(workspace, repository, jobId) {
         if (previous?.status === "indexed" && previous.content_hash === contentHash) {
           unchangedFiles += 1;
           await incrementIndexJob(jobId, { files: 1 });
+          metrics.files = (metrics.files || 0) + 1;
+          await updateStage("files", { done: metrics.files, total: files.length, status: metrics.files >= files.length ? "completed" : "running" });
           continue;
         }
 
@@ -1069,6 +1142,7 @@ async function indexRepository(workspace, repository, jobId) {
         const fileChunks = splitChunksForEmbedding(chunkContent(content, file, analysis.symbols));
         totalChunks += fileChunks.length;
         await updateIndexJob(jobId, { phase: "embedding", totalChunks });
+        await updateStage("embeddings", { status: "running", done: indexedChunks, total: totalChunks });
 
         const failedChunks = [];
         for (const originalChunk of fileChunks) {
@@ -1100,6 +1174,7 @@ async function indexRepository(workspace, repository, jobId) {
             indexedChunks += 1;
             metrics.chunks = indexedChunks;
             await incrementIndexJob(jobId, { chunks: 1 });
+            await updateStage("embeddings", { status: "running", done: indexedChunks, total: totalChunks });
           } catch (chunkError) {
             if (chunkError instanceof IndexCanceledError || chunkError.name === "AbortError") throw chunkError;
             failedChunks.push({ index: originalChunk.index, error: String(chunkError?.message || "chunk_index_failed").slice(0, 300) });
@@ -1136,6 +1211,7 @@ async function indexRepository(workspace, repository, jobId) {
         });
         await incrementIndexJob(jobId, { files: 1 });
         metrics.files = (metrics.files || 0) + 1;
+        await updateStage("files", { done: metrics.files, total: files.length, status: metrics.files >= files.length ? "completed" : "running" });
       } catch (fileError) {
         if (fileError instanceof IndexCanceledError || fileError.name === "AbortError") {
           throw fileError;
@@ -1146,20 +1222,38 @@ async function indexRepository(workspace, repository, jobId) {
           error: fileError instanceof Error ? fileError.message.slice(0, 1000) : "file_index_failed"
         });
         await incrementIndexJob(jobId, { files: 1 });
+        metrics.files = (metrics.files || 0) + 1;
+        await updateStage("files", { done: metrics.files, total: files.length, status: metrics.files >= files.length ? "completed" : "running" });
       }
     }
     activeFilePath = null;
 
-    await updateIndexJob(jobId, { phase: "graph", symbols: indexedSymbols });
+    await updateStage("files", { status: "completed", done: files.length, total: files.length });
+    await updateStage("embeddings", { status: "completed", done: indexedChunks, total: Math.max(totalChunks, indexedChunks) });
+    await updateIndexJob(jobId, { phase: "graph_write", currentFile: null, symbols: indexedSymbols });
     assertIndexNotCanceled(controller.signal);
     if (graphFiles.length) {
       const neo4jStartedAt = Date.now();
-      await upsertNeo4jRepository(workspace, repository, graphFiles, graphSymbols, graphRelationships);
+      await updateStage("graph_write", { label: "Gravando grafo", status: "running", done: 0, total: 1 });
+      await upsertNeo4jRepository(workspace, repository, graphFiles, graphSymbols, graphRelationships, async (done, total) => {
+        await updateStage("graph_write", { status: done >= total ? "completed" : "running", done, total });
+      });
       metrics.neo4j_write_ms += Date.now() - neo4jStartedAt;
+    } else {
+      await updateStage("graph_write", { label: "Gravando grafo", status: "completed", done: 1, total: 1 });
     }
-    const resolutionSummary = await resolveWorkspaceRelationships(workspace.id);
-    await syncResolvedRelationshipsToNeo4j(workspace.id);
+    await updateIndexJob(jobId, { phase: "resolving_relationships" });
+    const resolutionSummary = await resolveWorkspaceRelationships(workspace.id, async (done, total) => {
+      await updateStage("relationship_resolution", { label: "Resolvendo relações", status: done >= total ? "completed" : "running", done, total });
+    });
+    await updateIndexJob(jobId, { phase: "graph_sync" });
+    await syncResolvedRelationshipsToNeo4j(workspace.id, async (done, total) => {
+      await updateStage("graph_sync", { label: "Sincronizando relações", status: done >= total ? "completed" : "running", done, total });
+    });
+    await updateIndexJob(jobId, { phase: "symbol_linking" });
+    await updateStage("symbol_linking", { label: "Relacionando símbolos", status: "running", done: 0, total: 1 });
     await linkWorkspaceRelatedSymbols(workspace.id);
+    await updateStage("symbol_linking", { status: "completed", done: 1, total: 1 });
     assertIndexNotCanceled(controller.signal);
     await query(
       `UPDATE code_index_jobs
@@ -1186,6 +1280,9 @@ async function indexRepository(workspace, repository, jobId) {
   } catch (error) {
     metrics.files = metrics.files || 0;
     metrics.chunks = metrics.chunks || 0;
+    for (const stage of Object.values(metrics.pipeline || {})) {
+      if (stage.status === "running") stage.status = "error";
+    }
     await persistMetrics().catch((metricsError) => console.error("index metrics persistence failed", metricsError));
     if (error instanceof IndexCanceledError || error.name === "AbortError") {
       if (typeof activeFilePath === "string") {
@@ -1252,7 +1349,24 @@ async function runIndexScheduler() {
            ORDER BY j.priority ASC, j.queue_position ASC NULLS LAST, j.created_at ASC
            FOR UPDATE SKIP LOCKED LIMIT 1
          )
-         UPDATE code_index_jobs j SET status = 'running', phase = 'preparing', started_at = NOW(), started_after = NOW(), locked_at = NOW(), worker_id = $1
+         UPDATE code_index_jobs j
+         SET status = 'running',
+             phase = 'preparing',
+             current_file = NULL,
+             total_files = 0,
+             files_indexed = 0,
+             total_repository_files = 0,
+             skipped_files = 0,
+             total_chunks = 0,
+             chunks_indexed = 0,
+             symbols_indexed = 0,
+             metrics = '{}'::jsonb,
+             error = NULL,
+             started_at = NOW(),
+             started_after = NOW(),
+             finished_at = NULL,
+             locked_at = NOW(),
+             worker_id = $1
          FROM next_job WHERE j.id = next_job.id
          RETURNING j.id, j.repository_id, j.workspace_id`,
         [`admin-${process.pid}`]
@@ -1433,7 +1547,7 @@ async function repositoryHasLegacyIndexData(repositoryId) {
   return Number(row.chunks || 0) > 0 || Number(row.symbols || 0) > 0 || Number(row.relationships || 0) > 0;
 }
 
-async function resolveWorkspaceRelationships(workspaceId) {
+async function resolveWorkspaceRelationships(workspaceId, onProgress) {
   const [relationships, symbols, repositories, files] = await Promise.all([
     query(
       `SELECT id, repository_id, relationship_type, source_name, target_name, source_file_path,
@@ -1467,7 +1581,9 @@ async function resolveWorkspaceRelationships(workspaceId) {
   let resolved = 0;
   let unresolved = 0;
 
-  for (const relationship of relationships.rows) {
+  const totalRelationships = relationships.rows.length;
+  if (onProgress) await onProgress(0, totalRelationships || 1);
+  for (const [index, relationship] of relationships.rows.entries()) {
     const resolution = resolveRelationship(relationship, context);
     if (resolution.status === "unresolved") {
       unresolved += 1;
@@ -1493,7 +1609,12 @@ async function resolveWorkspaceRelationships(workspaceId) {
         resolution.metadata || {}
       ]
     );
+    if (onProgress && ((index + 1) % 100 === 0 || index + 1 === totalRelationships)) {
+      await onProgress(index + 1, totalRelationships || 1);
+    }
   }
+
+  if (onProgress && totalRelationships === 0) await onProgress(1, 1);
 
   return { resolved, unresolved };
 }
@@ -3120,7 +3241,7 @@ async function ensureNeo4jSchema() {
   ]);
 }
 
-async function upsertNeo4jRepository(workspace, repository, files, symbols, relationships = []) {
+async function upsertNeo4jRepository(workspace, repository, files, symbols, relationships = [], onProgress) {
   if (!neo4jPassword) {
     return;
   }
@@ -3216,23 +3337,10 @@ async function upsertNeo4jRepository(workspace, repository, files, symbols, rela
         sourceFilePath: relationship.sourceFilePath,
         line: relationship.line
       }
-    })),
-    {
-      statement: `
-        MATCH (w:Workspace {id: $workspaceId})-[:CONTAINS]->(:Repository)-[:CONTAINS]->(:CodeFile)-[:DECLARES]->(a:CodeSymbol)
-        MATCH (w)-[:CONTAINS]->(:Repository)-[:CONTAINS]->(:CodeFile)-[:DECLARES]->(b:CodeSymbol)
-        WHERE a.repository_id <> b.repository_id
-          AND a.name = b.name
-          AND elementId(a) < elementId(b)
-        MERGE (a)-[:RELATED_SYMBOL {reason: 'same_name_cross_repository'}]->(b)
-      `,
-      parameters: {
-        workspaceId: workspace.id
-      }
-    }
+    }))
   ];
 
-  await runNeo4jStatements(statements);
+  await runNeo4jStatementsBatched(statements, onProgress);
 }
 
 async function linkWorkspaceRelatedSymbols(workspaceId) {
@@ -3257,7 +3365,7 @@ async function linkWorkspaceRelatedSymbols(workspaceId) {
   ]);
 }
 
-async function syncResolvedRelationshipsToNeo4j(workspaceId) {
+async function syncResolvedRelationshipsToNeo4j(workspaceId, onProgress) {
   if (!neo4jPassword) {
     return;
   }
@@ -3369,7 +3477,9 @@ async function syncResolvedRelationshipsToNeo4j(workspaceId) {
   }
 
   if (statements.length) {
-    await runNeo4jStatements(statements);
+    await runNeo4jStatementsBatched(statements, onProgress);
+  } else if (onProgress) {
+    await onProgress(1, 1);
   }
 }
 
@@ -3437,6 +3547,17 @@ async function runNeo4jStatements(statements) {
   if (body.errors?.length) {
     throw new Error(`neo4j_statement_failed: ${JSON.stringify(body.errors).slice(0, 1000)}`);
   }
+}
+
+async function runNeo4jStatementsBatched(statements, onProgress, batchSize = 250) {
+  const total = statements.length;
+  if (onProgress) await onProgress(0, total || 1);
+  for (let offset = 0; offset < total; offset += batchSize) {
+    const batch = statements.slice(offset, offset + batchSize);
+    await runNeo4jStatements(batch);
+    if (onProgress) await onProgress(Math.min(offset + batch.length, total), total);
+  }
+  if (onProgress && total === 0) await onProgress(1, 1);
 }
 
 function sha256(value) {

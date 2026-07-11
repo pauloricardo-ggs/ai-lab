@@ -3,244 +3,182 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>AI Knowledge Platform</title>
+    <meta name="theme-color" content="#0a0a0b">
+    <title>AI Platform · Console</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
     <div class="shell">
       <aside class="sidebar">
-        <a class="brand" href="/" data-route="dashboard">
-          <span class="brand-mark">AI</span>
-          <span>
-            <strong>Knowledge</strong>
-            <small>Platform Console</small>
-          </span>
+        <a class="brand" href="/" data-route="dashboard" aria-label="AI Platform">
+          <span class="brand-mark">A</span>
+          <span><strong>AI Platform</strong><small>Operations console</small></span>
         </a>
 
-        <nav class="nav">
-          <a href="/" data-route="dashboard" class="active">Dashboard</a>
-          <a href="/admin" data-route="admin">Admin Panel</a>
-          <a href="/services/mcp-gateway" data-route="mcp">MCP Gateway</a>
+        <nav class="nav" aria-label="Navegacao principal">
+          <p class="nav-label">Operação</p>
+          <a href="/" data-route="dashboard" class="active"><span class="nav-icon">⌂</span>Visão geral</a>
+          <a href="/admin" data-route="admin"><span class="nav-icon">◇</span>Workspaces</a>
+          <p class="nav-label">Integrações</p>
+          <a href="/services/mcp-gateway" data-route="mcp"><span class="nav-icon">↗</span>MCP Gateway</a>
         </nav>
 
-        <section class="sidebar-panel">
-          <label for="adminKey">Admin API key</label>
+        <div class="sidebar-spacer"></div>
+        <section class="access-card">
+          <div class="access-heading"><span class="connection-dot"></span><span>Credencial administrativa</span></div>
           <div class="inline-control">
-            <input id="adminKey" type="password" placeholder="Opcional">
-            <button id="saveAdminKey" class="icon-button" title="Salvar chave">OK</button>
+            <input id="adminKey" type="password" autocomplete="off" aria-label="Admin API key" placeholder="API key">
+            <button id="saveAdminKey" class="icon-button" title="Salvar chave" aria-label="Salvar chave">Salvar</button>
           </div>
-          <p>Use quando `ADMIN_API_KEY` estiver configurada no ambiente.</p>
         </section>
       </aside>
 
       <main class="main">
         <header class="topbar">
           <div>
-            <p class="eyebrow">AI Knowledge Platform</p>
-            <h1 id="pageTitle">Dashboard</h1>
+            <p class="eyebrow">Console administrativa</p>
+            <h1 id="pageTitle">Visão geral</h1>
           </div>
           <div class="topbar-actions">
-            <span id="globalStatus" class="status-pill muted">Carregando</span>
-            <button id="refreshButton" class="secondary-button">Atualizar</button>
+            <span id="globalStatus" class="status-pill muted">Verificando</span>
+            <button id="refreshButton" class="secondary-button"><span aria-hidden="true">↻</span> Atualizar</button>
           </div>
         </header>
 
         <section id="view-dashboard" class="view active">
-          <div class="hero-band">
-            <div>
-              <p class="eyebrow">Operacao centralizada</p>
-              <h2>Servicos, conhecimento e codigo em um unico painel.</h2>
-              <p>Monitore a stack, abra interfaces operacionais e configure o acesso MCP para agentes de desenvolvimento.</p>
+          <section class="overview-strip" aria-label="Resumo da plataforma">
+            <div class="overview-copy">
+              <span class="section-kicker">Estado da plataforma</span>
+              <h2>Operação clara.<br>Sem ruído.</h2>
+              <p>Saúde dos serviços, capacidade e indexação técnica em uma única visão.</p>
             </div>
             <div class="metric-grid">
-              <div>
-                <strong id="onlineCount">0</strong>
-                <span>online</span>
-              </div>
-              <div>
-                <strong id="workspaceCount">0</strong>
-                <span>workspaces</span>
-              </div>
-              <div>
-                <strong id="repoCount">0</strong>
-                <span>repositorios</span>
-              </div>
+              <article><span>Serviços online</span><strong id="onlineCount">0</strong><small>componentes saudáveis</small></article>
+              <article><span>Workspaces</span><strong id="workspaceCount">0</strong><small>domínios técnicos</small></article>
+              <article><span>Repositórios</span><strong id="repoCount">0</strong><small>fontes cadastradas</small></article>
             </div>
-          </div>
+          </section>
 
-          <div id="serviceGrid" class="service-grid"></div>
+          <section class="content-section">
+            <div class="section-heading"><div><span class="section-kicker">Disponibilidade</span><h2>Serviços</h2></div><p>Endpoints e interfaces da stack.</p></div>
+            <div id="serviceGrid" class="service-grid"></div>
+          </section>
 
-          <section class="panel dashboard-panel">
-            <div class="panel-header">
-              <div>
-                <p class="eyebrow">Runtime</p>
-                <h2>Containers</h2>
-              </div>
-              <span id="containerSummary" class="status-pill muted">Carregando</span>
-            </div>
+          <section class="panel content-section">
+            <div class="panel-header"><div><span class="section-kicker">Runtime</span><h2>Containers</h2></div><span id="containerSummary" class="status-pill muted">Carregando</span></div>
             <div id="containerList" class="table-wrap"></div>
           </section>
         </section>
 
         <section id="view-admin" class="view">
           <div id="adminWorkspaceListScreen">
-            <section class="panel admin-workspaces-panel">
-              <div class="panel-header">
-                <div>
-                  <p class="eyebrow">Admin Panel</p>
-                  <h2>Workspaces</h2>
-                </div>
-                <button id="newWorkspaceButton" class="primary-button">Novo workspace</button>
+            <section class="content-section">
+              <div class="section-heading">
+                <div><span class="section-kicker">Domínios técnicos</span><h2>Workspaces</h2><p>Organize repositórios e índices com isolamento explícito.</p></div>
+                <button id="newWorkspaceButton" class="primary-button">＋ Novo workspace</button>
               </div>
-
-              <form id="workspaceForm" class="form-grid compact hidden">
-                <input id="workspaceName" placeholder="Nome do workspace" required>
-                <input id="workspaceSlug" placeholder="slug-opcional">
-                <input id="workspaceDescription" placeholder="Descricao">
-                <button class="primary-button" type="submit">Criar</button>
+              <form id="workspaceForm" class="create-card hidden">
+                <div><label for="workspaceName">Nome</label><input id="workspaceName" placeholder="Ex.: Plataforma de pagamentos" required></div>
+                <div><label for="workspaceSlug">Identificador</label><input id="workspaceSlug" placeholder="plataforma-pagamentos"></div>
+                <div class="wide-field"><label for="workspaceDescription">Descrição</label><input id="workspaceDescription" placeholder="Contexto e responsabilidade deste workspace"></div>
+                <button class="primary-button" type="submit">Criar workspace</button>
               </form>
-
-              <div id="workspaceList" class="list"></div>
+              <div id="workspaceList" class="workspace-grid"></div>
             </section>
           </div>
 
           <div id="workspaceDetailScreen" class="hidden">
-            <section class="panel workspace-detail-panel">
-              <div class="panel-header">
-                <div>
-                  <button id="backToWorkspaces" class="secondary-button" type="button">Voltar</button>
-                  <p class="eyebrow">Workspace</p>
-                  <h2 id="selectedWorkspaceTitle">Selecione um workspace</h2>
-                </div>
-                <div class="detail-badges">
-                  <span id="selectedWorkspaceSlug" class="code-chip">workspace</span>
-                  <span id="workspaceDetailRepoCount" class="status-pill muted">0 repos</span>
-                </div>
-              </div>
-
-              <div id="repoEmptyState" class="empty-state">
-                Selecione ou crie um workspace para gerenciar repositorios.
-              </div>
-
-              <div id="repoManager" class="hidden">
-                <div class="repo-toolbar">
-                  <div class="inline-control wide">
-                    <input id="githubOwner" placeholder="usuario/org opcional; vazio lista repos do token">
-                    <button id="loadGithubRepos" class="secondary-button">Listar GitHub</button>
-                  </div>
-                </div>
-
-                <form id="repoForm" class="repo-form">
-                  <select id="remoteRepoSelect">
-                    <option value="">Selecionar repo listado ou informar manualmente</option>
-                  </select>
-                  <input id="repoName" placeholder="Nome do repo">
-                  <input id="repoUrl" placeholder="URL de clone HTTPS ou SSH">
-                  <input id="repoBranch" placeholder="Branch" value="main">
-                  <button class="primary-button" type="submit">Adicionar e clonar</button>
-                </form>
-
-                <section class="workspace-section">
-                  <div class="panel-header compact-header">
-                    <div>
-                      <p class="eyebrow">Repositorios</p>
-                      <h3>Repositorios do workspace</h3>
-                    </div>
-                  </div>
-                  <div id="repoList" class="table-wrap"></div>
-                </section>
-
-                <section id="qualityReportSection" class="workspace-section hidden">
-                  <div class="panel-header compact-header">
-                    <div>
-                      <p class="eyebrow">Qualidade</p>
-                      <h3 id="qualityReportTitle">Relatorio de indexacao</h3>
-                    </div>
-                    <span id="qualityReportSummary" class="status-pill muted">-</span>
-                  </div>
-                  <div id="qualityReportBody"></div>
-                </section>
-
-                <section class="index-progress workspace-section">
-                  <div class="panel-header compact-header">
-                    <div>
-                      <p class="eyebrow">Indexacao</p>
-                      <h3>Rodando agora</h3>
-                    </div>
-                    <span id="indexSummary" class="status-pill muted">Sem jobs</span>
-                  </div>
-                  <div id="queueControls" class="queue-controls"></div>
-                  <div id="indexRunningList" class="job-list"></div>
-                </section>
-
-                <section class="workspace-section">
-                  <div class="panel-header compact-header">
-                    <div>
-                      <p class="eyebrow">Historico</p>
-                      <h3>Indexacoes finalizadas</h3>
-                    </div>
-                    <span id="indexHistorySummary" class="status-pill muted">0 jobs</span>
-                  </div>
-                  <div id="indexHistoryList" class="job-list compact-jobs"></div>
-                  <div id="indexPagination" class="pagination"></div>
-                </section>
-              </div>
+            <div class="detail-toolbar">
+              <button id="backToWorkspaces" class="text-button" type="button">← Todos os workspaces</button>
+              <div class="detail-badges"><span id="selectedWorkspaceSlug" class="code-chip">workspace</span><span id="workspaceDetailRepoCount" class="status-pill muted">0 repos</span></div>
+            </div>
+            <section class="workspace-hero">
+              <span class="section-kicker">Workspace técnico</span>
+              <h2 id="selectedWorkspaceTitle">Selecione um workspace</h2>
+              <p>Repositórios, fila de processamento e qualidade do índice.</p>
             </section>
+
+            <div id="repoEmptyState" class="empty-state">Selecione ou crie um workspace para gerenciar repositórios.</div>
+            <div id="repoManager" class="hidden">
+              <section class="workspace-section panel">
+                <div class="panel-header"><div><span class="section-kicker">Inventário</span><h2>Repositórios</h2></div><button id="openRepoModal" class="primary-button" type="button">＋ Adicionar repositório</button></div>
+                <div id="repoList" class="table-wrap"></div>
+              </section>
+
+              <section class="workspace-section panel live-index-panel">
+                <div class="panel-header"><div><span class="live-dot"></span><span class="section-kicker">Tempo real</span><h2>Indexação</h2></div><span id="indexSummary" class="status-pill muted">Sem jobs</span></div>
+                <div id="queueControls" class="queue-controls"></div>
+                <div id="indexRunningList" class="job-list"></div>
+              </section>
+
+              <section id="qualityReportSection" class="workspace-section panel hidden">
+                <div class="panel-header"><div><span class="section-kicker">Diagnóstico</span><h2 id="qualityReportTitle">Qualidade do índice</h2></div><span id="qualityReportSummary" class="status-pill muted">-</span></div>
+                <div id="qualityReportBody"></div>
+              </section>
+
+              <section class="workspace-section panel">
+                <div class="panel-header"><div><span class="section-kicker">Auditoria</span><h2>Histórico de indexações</h2></div><span id="indexHistorySummary" class="status-pill muted">0 jobs</span></div>
+                <div id="indexHistoryList" class="job-list compact-jobs"></div>
+                <div id="indexPagination" class="pagination"></div>
+              </section>
+            </div>
           </div>
         </section>
 
         <section id="view-mcp" class="view">
-          <div class="split-layout mcp-layout">
+          <div class="mcp-layout">
             <section class="panel">
-              <div class="panel-header">
-                <div>
-                  <p class="eyebrow">Developer Console</p>
-                  <h2>MCP Gateway</h2>
-                </div>
-                <span id="mcpStatus" class="status-pill muted">Verificando</span>
-              </div>
-
-              <div class="info-stack">
-                <div>
-                  <span>Base URL</span>
-                  <code id="mcpBaseUrl">-</code>
-                </div>
-                <div>
-                  <span>Header</span>
-                  <code>Authorization: Bearer &lt;GATEWAY_API_KEY&gt;</code>
-                </div>
-                <div>
-                  <span>Workspace</span>
-                  <code>workspace_id ou workspace_slug nos argumentos da tool</code>
-                </div>
-              </div>
-
+              <div class="panel-header"><div><span class="section-kicker">Endpoint técnico</span><h2>MCP Gateway</h2></div><span id="mcpStatus" class="status-pill muted">Verificando</span></div>
+              <div class="info-stack"><div><span>Base URL</span><code id="mcpBaseUrl">-</code></div><div><span>Autenticação</span><code>Authorization: Bearer &lt;GATEWAY_API_KEY&gt;</code></div><div><span>Escopo obrigatório</span><code>workspace_id ou workspace_slug</code></div></div>
               <pre id="mcpConfigExample" class="code-block"></pre>
-
-              <h3>Tools disponiveis</h3>
-              <div id="toolList" class="tool-list"></div>
             </section>
-
             <section class="panel">
-              <div class="panel-header">
-                <div>
-                  <p class="eyebrow">Configuracao</p>
-                  <h2>Registrar em um agente</h2>
-                </div>
-              </div>
-              <div class="info-stack">
-                <div><strong>Codex, Claude e Copilot</strong><span>Cadastre a URL acima como servidor MCP remoto com transporte Streamable HTTP.</span></div>
-                <div><strong>Autenticacao</strong><span>Use o header <code>Authorization: Bearer &lt;GATEWAY_API_KEY&gt;</code>.</span></div>
-                <div><strong>Open WebUI</strong><span>Em Admin Settings → External Tools, adicione um servidor MCP (Streamable HTTP), informe a URL e o token. Depois habilite a tool na conversa.</span></div>
-                <div><strong>Workspace</strong><span>As tools exigem <code>workspace_slug</code> ou <code>workspace_id</code>. Inclua-o nas instrucoes do modelo ou na pergunta.</span></div>
-              </div>
+              <div class="panel-header"><div><span class="section-kicker">Capacidades</span><h2>Tools publicadas</h2></div></div>
+              <p class="section-description">Use transporte Streamable HTTP. Cada chamada deve informar o workspace técnico para manter o isolamento.</p>
+              <div id="toolList" class="tool-list"></div>
             </section>
           </div>
         </section>
       </main>
     </div>
 
-    <div id="toast" class="toast hidden"></div>
+    <div id="repoModal" class="modal-backdrop hidden" role="presentation">
+      <section class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="repoModalTitle">
+        <header class="modal-header">
+          <div><span class="section-kicker">Nova fonte</span><h2 id="repoModalTitle">Adicionar repositório</h2></div>
+          <button id="closeRepoModal" class="modal-close" type="button" aria-label="Fechar">×</button>
+        </header>
+        <form id="repoForm" class="repo-form">
+          <div class="source-tabs" role="tablist" aria-label="Origem do repositório">
+            <button class="source-tab active" type="button" role="tab" aria-selected="true" data-repo-source="github">Selecionar no GitHub</button>
+            <button class="source-tab" type="button" role="tab" aria-selected="false" data-repo-source="manual">URL HTTPS ou SSH</button>
+          </div>
+
+          <div id="githubRepoSource" class="source-panel" role="tabpanel">
+            <div class="source-intro"><strong>Repositórios do GitHub</strong><span>Carregue todos os repositórios acessíveis pelo token e filtre pelo nome.</span></div>
+            <div class="repo-toolbar"><button id="loadGithubRepos" type="button" class="secondary-button">Carregar repositórios</button></div>
+            <label for="githubRepoSearch">Buscar por nome</label>
+            <div class="repo-search-field"><span aria-hidden="true">⌕</span><input id="githubRepoSearch" placeholder="Digite o nome do repositório" autocomplete="off" disabled></div>
+            <label for="remoteRepoSelect">Repositório</label>
+            <select id="remoteRepoSelect" disabled><option value="">Carregue os repositórios para começar</option></select>
+          </div>
+
+          <div id="manualRepoSource" class="source-panel hidden" role="tabpanel">
+            <div class="source-intro"><strong>Clonar por URL</strong><span>Use uma URL HTTPS ou SSH. Repositórios privados exigem credenciais válidas no servidor.</span></div>
+            <div class="manual-repo-fields">
+              <div><label for="repoName">Nome</label><input id="repoName" placeholder="meu-repositorio"></div>
+              <div><label for="repoUrl">URL de clone</label><input id="repoUrl" placeholder="https://github.com/org/repo.git ou git@github.com:org/repo.git"></div>
+            </div>
+          </div>
+
+          <footer class="modal-footer">
+            <div class="branch-field"><label for="repoBranch">Branch</label><input id="repoBranch" placeholder="Branch" value="main"></div>
+            <div class="modal-actions"><button id="cancelRepoModal" class="secondary-button" type="button">Cancelar</button><button class="primary-button" data-repo-submit type="submit">Adicionar e indexar</button></div>
+          </footer>
+        </form>
+      </section>
+    </div>
+    <div id="toast" class="toast hidden" role="status"></div>
     <script src="/app.js" type="module"></script>
   </body>
 </html>

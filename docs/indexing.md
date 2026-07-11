@@ -61,6 +61,41 @@ Antes de chamar o Ollama, chunks que ultrapassam `EMBEDDING_MAX_CHARS` ou `EMBED
 
 O job armazena métricas de scan, parsing, embeddings, escrita no Qdrant/PostgreSQL/Neo4j, throughput, duração de execução e tempo em fila em `metrics`/campos do job — inclusive quando a execução falha.
 
+### Telemetria em tempo real no Admin Panel
+
+A API de jobs acrescenta um objeto `telemetry` calculado no momento da consulta:
+
+- `elapsed_ms`
+- `progress_percent`
+- `files_per_minute`
+- `chunks_per_minute`
+- `remaining_files`
+- `stages`
+
+O progresso geral combina as etapas com pesos operacionais: scan (2%), analise de
+arquivos (35%), embeddings (35%), gravacao do grafo (10%), resolucao de relacoes
+(9%), sincronizacao do grafo (7%) e vinculos finais (2%). Como o custo de arquivos,
+embeddings e relacoes varia muito entre repositorios, o painel nao apresenta ETA.
+Em seu lugar, mostra o tempo exato decorrido desde o inicio do processamento.
+
+O card exibe somente o progresso geral por padrao. Ao expandir `Detalhes das
+etapas`, o operador ve uma barra por fase, seus contadores, tempos dos subsistemas
+e demais metricas. A expansao permanece aberta
+durante as atualizacoes em tempo real.
+
+O frontend consulta o backend a cada dois segundos e atualiza cronometro e taxas
+localmente a cada segundo entre consultas. Tempos acumulados das etapas sao
+persistidos ao final de cada arquivo para que uma atualizacao da pagina preserve a
+visibilidade de parsing, embeddings e escritas nos bancos.
+
+Quando o Admin reinicia com um job em andamento, o job volta para a fila e sua
+execucao e retomada de forma incremental. Ao reclamar esse job, o scheduler zera
+atomicamente contadores, totais, tempos e erro da tentativa interrompida. Isso e
+necessario porque o loop de arquivos reinicia do inicio; preservar os contadores
+anteriores faria arquivos e chunks serem contabilizados duas vezes. O inventario e
+os hashes ja persistidos continuam sendo usados para evitar refazer arquivos
+inalterados.
+
 Um repositorio nao pode ter duas indexacoes ativas ou aguardando ao mesmo tempo. Se ja houver job `queued`, `running`, `paused` ou `canceling`, a tentativa de reindexacao retorna `repository_index_already_running`. Jobs ativos podem ser cancelados pela Admin UI; o job passa por `canceling` e termina como `canceled`.
 
 ## Indexacao Incremental

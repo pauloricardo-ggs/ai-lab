@@ -5,6 +5,8 @@ const state = {
   selectedWorkspace: null,
   mcp: { tools: [], base_url: "" },
   remoteRepos: [],
+  repoSourceMode: "github",
+  expandedIndexJobs: new Set(),
   indexReport: null,
   indexJobs: {
     running: [],
@@ -45,6 +47,10 @@ const els = {
   repoManager: document.querySelector("#repoManager"),
   repoList: document.querySelector("#repoList"),
   repoForm: document.querySelector("#repoForm"),
+  repoModal: document.querySelector("#repoModal"),
+  openRepoModal: document.querySelector("#openRepoModal"),
+  closeRepoModal: document.querySelector("#closeRepoModal"),
+  cancelRepoModal: document.querySelector("#cancelRepoModal"),
   repoName: document.querySelector("#repoName"),
   repoUrl: document.querySelector("#repoUrl"),
   repoBranch: document.querySelector("#repoBranch"),
@@ -52,9 +58,11 @@ const els = {
   qualityReportTitle: document.querySelector("#qualityReportTitle"),
   qualityReportSummary: document.querySelector("#qualityReportSummary"),
   qualityReportBody: document.querySelector("#qualityReportBody"),
-  githubOwner: document.querySelector("#githubOwner"),
+  githubRepoSearch: document.querySelector("#githubRepoSearch"),
   loadGithubRepos: document.querySelector("#loadGithubRepos"),
   remoteRepoSelect: document.querySelector("#remoteRepoSelect"),
+  githubRepoSource: document.querySelector("#githubRepoSource"),
+  manualRepoSource: document.querySelector("#manualRepoSource"),
   indexSummary: document.querySelector("#indexSummary"),
   indexRunningList: document.querySelector("#indexRunningList"),
   indexHistorySummary: document.querySelector("#indexHistorySummary"),
@@ -128,8 +136,8 @@ function routeTo(route) {
   }
 
   const titles = {
-    dashboard: "Dashboard",
-    admin: "Admin Panel",
+    dashboard: "Visão geral",
+    admin: "Workspaces",
     mcp: "MCP Gateway"
   };
   els.pageTitle.textContent = titles[route] || "Dashboard";
@@ -347,22 +355,38 @@ function renderIndexReport(report) {
   const errors = Number(summary.errors || 0);
   const total = Number(summary.total || 0);
   const score = total ? Math.round((indexed / total) * 100) : 0;
+  const symbols = sumCounts(report.symbols_by_type);
+  const relationships = sumCounts(report.relationships_by_type);
+  const unresolved = Number((report.relationships_by_resolution || []).find((row) => row.status === "unresolved")?.count || 0);
+  const resolved = Math.max(relationships - unresolved, 0);
+  const resolutionRate = relationships ? Math.round((resolved / relationships) * 100) : 100;
+  const qualityLabel = errors ? "Ação necessária" : skipped ? "Índice saudável com ressalvas" : indexed ? "Índice saudável" : "Sem dados indexados";
+  const qualityDescription = errors
+    ? `${errors} arquivo(s) falharam. Revise os problemas antes de confiar integralmente nas buscas.`
+    : skipped
+      ? `${skipped} arquivo(s) foram ignorados pelas regras de indexação. Isso pode ser esperado.`
+      : "Todos os arquivos elegíveis foram processados sem erros registrados.";
 
   els.qualityReportSection.classList.remove("hidden");
-  els.qualityReportTitle.textContent = `Relatorio: ${report.repository.name}`;
+  els.qualityReportTitle.textContent = `Qualidade · ${report.repository.name}`;
   els.qualityReportSummary.textContent = `${score}% indexado`;
   els.qualityReportSummary.className = `status-pill ${errors ? "offline" : skipped ? "warning" : indexed ? "online" : "muted"}`;
   els.qualityReportBody.innerHTML = `
+    <div class="quality-score">
+      <div class="score-ring" style="--score:${score}"><strong>${score}%</strong></div>
+      <div><span class="section-kicker">Cobertura do índice</span><h3>${qualityLabel}</h3><p>${qualityDescription} Taxa de resolução das relações: ${resolutionRate}%.</p></div>
+    </div>
     <div class="quality-grid">
       ${metricCard("Arquivos", total)}
       ${metricCard("Indexados", indexed)}
       ${metricCard("Ignorados", skipped)}
       ${metricCard("Erros", errors)}
-      ${metricCard("Simbolos", sumCounts(report.symbols_by_type))}
-      ${metricCard("Relacoes", sumCounts(report.relationships_by_type))}
-      ${metricCard("Resolvidas", sumCounts((report.relationships_by_resolution || []).filter((row) => row.status !== "unresolved")))}
-      ${metricCard("Nao resolvidas", Number((report.relationships_by_resolution || []).find((row) => row.status === "unresolved")?.count || 0))}
+      ${metricCard("Símbolos", symbols)}
+      ${metricCard("Relações", relationships)}
+      ${metricCard("Resolvidas", resolved)}
+      ${metricCard("Não resolvidas", unresolved)}
     </div>
+    ${renderLatestReportRun(report.latest_job)}
     <div class="quality-columns">
       ${languageCoverageTable("Arquivos por linguagem", report.files_by_language)}
       ${reportTable("Simbolos por linguagem", report.symbols_by_language, "language")}
@@ -375,6 +399,21 @@ function renderIndexReport(report) {
     <div class="quality-issues">
       <h4>Arquivos ignorados ou com erro</h4>
       ${renderFileIssues(report.file_issues || [])}
+    </div>
+  `;
+}
+
+function renderLatestReportRun(job) {
+  if (!job) return "";
+  const telemetry = liveTelemetry(job);
+  return `
+    <div class="report-run-summary">
+      <div><span>Última execução</span><strong>${formatDateTime(job.finished_at || job.started_at || job.created_at)}</strong></div>
+      <div><span>Status</span><strong>${escapeHtml(jobStatusLabel(job.status))}</strong></div>
+      <div><span>Duração</span><strong>${formatDuration(telemetry.elapsedMs)}</strong></div>
+      <div><span>Arquivos</span><strong>${Number(job.files_indexed || 0)}</strong></div>
+      <div><span>Chunks</span><strong>${Number(job.chunks_indexed || 0)}</strong></div>
+      <div><span>Taxa média</span><strong>${formatRate(telemetry.filesPerMinute, "arq/min")}</strong></div>
     </div>
   `;
 }
@@ -528,7 +567,7 @@ function renderIndexJobs(error) {
     els.queueControls.innerHTML = `<span class="muted-text">Fila ${queue.paused ? "pausada" : "ativa"} · concorrencia</span><select data-queue-concurrency><option value="1" ${Number(queue.max_concurrent_repositories) === 1 ? "selected" : ""}>1</option><option value="2" ${Number(queue.max_concurrent_repositories) === 2 ? "selected" : ""}>2</option><option value="3" ${Number(queue.max_concurrent_repositories) === 3 ? "selected" : ""}>3</option></select><button class="secondary-button small-button" data-toggle-queue>${queue.paused ? "Retomar fila" : "Pausar fila"}</button>`;
   }
 
-  const runningJobs = state.indexJobs.running || [];
+  const runningJobs = sortActiveIndexJobs(state.indexJobs.running || []);
   const historyJobs = state.indexJobs.history || [];
   const running = runningJobs.length;
   if (!running && !historyJobs.length) {
@@ -545,8 +584,9 @@ function renderIndexJobs(error) {
   const queued = runningJobs.filter((job) => job.status === "queued").length;
   els.indexSummary.textContent = running ? `${running} ativo(s)${queued ? ` · ${queued} na fila` : ""}` : "Nenhuma em execucao";
   els.indexSummary.className = `status-pill ${running ? "warning" : "muted"}`;
+  let queueRank = 0;
   els.indexRunningList.innerHTML = running
-    ? runningJobs.map((job) => renderIndexJob(job, { compact: false })).join("")
+    ? runningJobs.map((job) => renderIndexJob(job, { compact: false, queueRank: job.status === "queued" ? ++queueRank : null })).join("")
     : `<div class="empty-state">Nenhuma indexacao em execucao.</div>`;
 
   els.indexHistorySummary.textContent = `${state.indexJobs.total} jobs`;
@@ -557,79 +597,146 @@ function renderIndexJobs(error) {
   renderIndexPagination();
 }
 
+function sortActiveIndexJobs(jobs) {
+  const statusOrder = { running: 0, canceling: 1, queued: 2, paused: 3 };
+  return [...jobs].sort((left, right) => {
+    const statusDifference = (statusOrder[left.status] ?? 9) - (statusOrder[right.status] ?? 9);
+    if (statusDifference) return statusDifference;
+    if (left.status === "queued" && right.status === "queued") {
+      const priorityDifference = Number(left.priority ?? 100) - Number(right.priority ?? 100);
+      if (priorityDifference) return priorityDifference;
+      const leftPosition = left.queue_position == null ? Number.MAX_SAFE_INTEGER : Number(left.queue_position);
+      const rightPosition = right.queue_position == null ? Number.MAX_SAFE_INTEGER : Number(right.queue_position);
+      if (leftPosition !== rightPosition) return leftPosition - rightPosition;
+    }
+    return new Date(left.started_at || left.created_at) - new Date(right.started_at || right.created_at);
+  });
+}
+
 function renderIndexJob(job, options = {}) {
   const fileTotal = Number(job.total_files || 0);
   const fileDone = Number(job.files_indexed || 0);
-  const filesRemaining = fileTotal ? Math.max(fileTotal - fileDone, 0) : "-";
   const repoTotal = Number(job.total_repository_files || 0);
   const skippedFiles = Number(job.skipped_files || 0);
   const chunkTotal = Number(job.total_chunks || 0);
   const chunkDone = Number(job.chunks_indexed || 0);
   const repoName = job.repository_name || job.current_repository || "workspace";
-  const currentFile = job.current_file ? `<span title="${escapeHtml(job.current_file)}">${escapeHtml(job.current_file)}</span>` : "<span>-</span>";
+  const currentFile = job.current_file || "Aguardando próximo estágio";
   const metrics = job.metrics || {};
+  const telemetry = liveTelemetry(job);
+  const isLive = job.status === "running" || job.status === "canceling";
+  const invalidCounters = (fileTotal > 0 && fileDone > fileTotal) || (chunkTotal > 0 && chunkDone > chunkTotal);
+  const waiting = ["queued", "paused"].includes(job.status);
+  const timeLabel = waiting ? "Tempo em fila" : isLive ? "Tempo em processamento" : "Duração";
+  const displayedTime = waiting ? Date.now() - new Date(job.created_at).getTime() : telemetry.elapsedMs;
 
   return `
-    <article class="index-job ${options.compact ? "compact" : ""}">
+    <article class="index-job ${options.compact ? "compact" : ""} ${isLive ? "is-live" : ""}">
       <header>
         <div>
           <strong>${escapeHtml(repoName)}</strong>
-          <span>${escapeHtml(job.scope || "workspace")} · ${escapeHtml(phaseLabel(job.phase))}</span>
+          <span>${escapeHtml(job.scope || "workspace")} · ${escapeHtml(phaseLabel(job.phase))}${options.queueRank ? ` · ${options.queueRank === 1 ? "próximo na fila" : `${options.queueRank}º na fila`}` : ""}</span>
         </div>
         <div class="job-actions">
           <span class="status-pill ${jobStatusClass(job.status)}">${escapeHtml(jobStatusLabel(job.status))}</span>
           ${!options.compact && isIndexJobRunning(job) ? `${job.status === "queued" ? `<button class="secondary-button small-button" data-queue-action="pause" data-index-job="${job.id}">Pausar</button><button class="secondary-button small-button" data-queue-action="top" data-index-job="${job.id}">Topo</button><button class="secondary-button small-button" data-queue-action="up" data-index-job="${job.id}">↑</button><button class="secondary-button small-button" data-queue-action="down" data-index-job="${job.id}">↓</button><button class="secondary-button small-button" data-queue-action="priority" data-index-job="${job.id}">Prioridade</button>` : job.status === "paused" ? `<button class="secondary-button small-button" data-queue-action="resume" data-index-job="${job.id}">Retomar</button><button class="secondary-button small-button" data-queue-action="priority" data-index-job="${job.id}">Prioridade</button>` : ""}<button class="danger-button small-button" data-cancel-index-job="${job.id}" ${job.status === "canceling" ? "disabled" : ""}>${job.status === "canceling" ? "Cancelando" : "Cancelar"}</button>` : ""}
         </div>
       </header>
-      <div class="job-meta">
-        <div>
-          <span>Arquivo atual</span>
-          ${currentFile}
-        </div>
-        <div>
-          <span>Arquivos repo</span>
-          <strong>${repoTotal || "-"}</strong>
-        </div>
-        <div>
-          <span>Ignorados</span>
-          <strong>${skippedFiles}</strong>
-        </div>
-        <div>
-          <span>Simbolos</span>
-          <strong>${Number(job.symbols_indexed || 0)}</strong>
-        </div>
-        <div>
-          <span>Restantes</span>
-          <strong>${filesRemaining}</strong>
-        </div>
-        <div>
-          <span>Inicio</span>
-          <strong>${formatDateTime(job.started_at || job.created_at)}</strong>
-        </div>
-        <div><span>Tempo em fila</span><strong>${formatDuration((job.started_after ? new Date(job.started_after) : new Date()) - new Date(job.created_at))}</strong></div>
-        <div><span>Prioridade</span><strong>${Number(job.priority || 100)}</strong></div>
-        ${job.queue_position !== null && job.queue_position !== undefined ? `<div><span>Posicao</span><strong>${Number(job.queue_position)}</strong></div>` : ""}
-        <div>
-          <span>Fim</span>
-          <strong>${formatDateTime(job.finished_at)}</strong>
-        </div>
+      <div class="live-metrics">
+        <div class="live-metric"><span>${isLive ? "Processando agora" : "Último arquivo"}</span><strong title="${escapeHtml(currentFile)}">${escapeHtml(currentFile)}</strong></div>
+        <div class="live-metric"><span>Taxa de arquivos</span><strong>${formatRate(telemetry.filesPerMinute, "arq/min")}</strong></div>
+        <div class="live-metric"><span>Taxa de chunks</span><strong>${formatRate(telemetry.chunksPerMinute, "chunks/min")}</strong></div>
+        <div class="live-metric eta"><span>${timeLabel}</span><strong>${formatDuration(displayedTime)}</strong></div>
       </div>
-      <div class="progress-row">
-        <span>Indexaveis ${fileDone}/${fileTotal || "-"}</span>
-        ${renderProgressBar(fileDone, fileTotal)}
+      <div class="progress-block">
+        <div class="progress-label"><span>Progresso geral · ${escapeHtml(phaseLabel(job.phase))}</span><strong>${telemetry.progressPercent.toFixed(1)}%</strong></div>
+        ${renderProgressBar(telemetry.progressPercent, 100)}
       </div>
-      <div class="progress-row">
-        <span>Chunks ${chunkDone}/${chunkTotal || "-"}</span>
-        ${renderProgressBar(chunkDone, chunkTotal)}
-      </div>
-      ${metrics.total_ms ? `<div class="muted-text">Metricas: execucao ${formatDuration(metrics.total_ms)} · scan ${formatDuration(metrics.scan_ms)} · parsing ${formatDuration(metrics.parsing_ms)} · embeddings ${formatDuration(metrics.embedding_ms)} · Qdrant ${formatDuration(metrics.qdrant_write_ms)} · PostgreSQL ${formatDuration(metrics.postgres_write_ms)} · Neo4j ${formatDuration(metrics.neo4j_write_ms)} · ${escapeHtml(metrics.chunks_per_minute || 0)} chunks/min</div>` : ""}
+      <details class="pipeline-details" data-pipeline-job="${job.id}" ${state.expandedIndexJobs.has(job.id) ? "open" : ""}>
+        <summary><span>Detalhes das etapas</span><span class="details-hint">Expandir</span></summary>
+        <div class="pipeline-details-body">
+          ${renderPipelineStages(job, telemetry)}
+          <div class="job-meta">
+            <div><span>Arquivos no repo</span><strong>${repoTotal || "—"}</strong></div>
+            <div><span>Ignorados</span><strong>${skippedFiles}</strong></div>
+            <div><span>Símbolos</span><strong>${Number(job.symbols_indexed || 0)}</strong></div>
+            <div><span>Restantes</span><strong>${telemetry.remainingFiles ?? "—"}</strong></div>
+            <div><span>Início</span><strong>${formatDateTime(job.started_at || job.created_at)}</strong></div>
+            <div><span>Tempo em fila</span><strong>${formatDuration((job.started_after ? new Date(job.started_after) : new Date()) - new Date(job.created_at))}</strong></div>
+          </div>
+          ${renderTimingStrip(metrics)}
+        </div>
+      </details>
+      ${invalidCounters ? `<div class="job-error">Contadores inconsistentes detectados. Este job foi iniciado por uma versão anterior; reinicie ou reexecute a indexação para recalcular a telemetria.</div>` : ""}
       ${job.error ? `<div class="job-error">${escapeHtml(job.error)}</div>` : ""}
     </article>
   `;
 }
 
+function liveTelemetry(job) {
+  const telemetry = job.telemetry || {};
+  const startedAt = job.started_at ? new Date(job.started_at).getTime() : null;
+  const finishedAt = job.finished_at ? new Date(job.finished_at).getTime() : null;
+  const now = Date.now();
+  const elapsedMs = startedAt ? Math.max(0, (finishedAt || now) - startedAt) : Number(telemetry.elapsed_ms || 0);
+  const minutes = elapsedMs / 60000;
+  const filesDone = Number(job.files_indexed || 0);
+  const chunksDone = Number(job.chunks_indexed || 0);
+  const total = Number(job.total_files || 0);
+  const filesPerMinute = minutes > 0 ? filesDone / minutes : Number(telemetry.files_per_minute || 0);
+  const chunksPerMinute = minutes > 0 ? chunksDone / minutes : Number(telemetry.chunks_per_minute || 0);
+  const remainingFiles = total > 0 ? Math.max(total - filesDone, 0) : null;
+  const stages = job.telemetry?.stages || job.metrics?.pipeline || {};
+  const weights = { scan: 2, files: 35, embeddings: 35, graph_write: 10, relationship_resolution: 9, graph_sync: 7, symbol_linking: 2 };
+  let progressPercent = total > 0 ? Math.min(100, (filesDone / total) * 100) : 0;
+  if (Object.keys(stages).length) {
+    progressPercent = Object.entries(weights).reduce((sum, [key, weight]) => {
+      const stage = stages[key] || {};
+      const value = stage.status === "completed" ? 100 : Math.min(100, Number(stage.progress_percent || 0));
+      return sum + value * weight / 100;
+    }, 0);
+  }
+  return { elapsedMs, filesPerMinute, chunksPerMinute, remainingFiles, progressPercent, stages };
+}
+
+function renderPipelineStages(job, telemetry) {
+  const definitions = [
+    ["scan", "Mapeamento"], ["files", "Análise de arquivos"], ["embeddings", "Embeddings"],
+    ["graph_write", "Gravação no Neo4j"], ["relationship_resolution", "Resolução de relações"],
+    ["graph_sync", "Sincronização do grafo"], ["symbol_linking", "Vínculos entre símbolos"]
+  ];
+  return `<div class="stage-list">${definitions.map(([key, label]) => {
+    const stage = telemetry.stages[key] || {};
+    const percent = stage.status === "completed" ? 100 : Math.min(100, Number(stage.progress_percent || 0));
+    const status = stage.status || "pending";
+    const count = Number(stage.total || 0) > 1 ? `${Number(stage.done || 0)}/${Number(stage.total)}` : stageStatusLabel(status);
+    return `<div class="stage-row ${status}"><div class="stage-label"><span>${label}</span><strong>${count} · ${percent.toFixed(0)}%</strong></div>${renderProgressBar(percent, 100)}</div>`;
+  }).join("")}</div>`;
+}
+
+function stageStatusLabel(status) {
+  return { pending: "Aguardando", running: "Em andamento", completed: "Concluído", error: "Erro" }[status] || status;
+}
+
+function formatRate(value, unit) {
+  if (!Number.isFinite(value) || value <= 0) return "—";
+  const formatted = value >= 100 ? Math.round(value) : value >= 10 ? value.toFixed(1) : value.toFixed(2);
+  return `${formatted} ${unit}`;
+}
+
+function renderTimingStrip(metrics) {
+  if (!metrics || !Object.keys(metrics).length) return "";
+  const entries = [
+    ["Scan", metrics.scan_ms], ["Parsing", metrics.parsing_ms], ["Embeddings", metrics.embedding_ms],
+    ["Qdrant", metrics.qdrant_write_ms], ["PostgreSQL", metrics.postgres_write_ms], ["Neo4j", metrics.neo4j_write_ms]
+  ].filter(([, value]) => Number(value || 0) > 0);
+  if (!entries.length) return "";
+  return `<div class="timing-strip">${entries.map(([label, value]) => `<span>${label}<strong>${formatDuration(value)}</strong></span>`).join("")}</div>`;
+}
+
 function formatDuration(milliseconds) {
   const seconds = Math.max(0, Math.round(Number(milliseconds || 0) / 1000));
+  if (seconds >= 3600) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
   return seconds >= 60 ? `${Math.floor(seconds / 60)}m ${seconds % 60}s` : `${seconds}s`;
 }
 
@@ -694,6 +801,10 @@ function phaseLabel(phase) {
     embedding: "gerando embeddings",
     symbols: "extraindo simbolos",
     graph: "montando grafo",
+    graph_write: "gravando grafo",
+    resolving_relationships: "resolvendo relações",
+    graph_sync: "sincronizando grafo",
+    symbol_linking: "relacionando símbolos",
     canceling: "cancelando",
     canceled: "cancelado",
     completed: "concluido",
@@ -826,7 +937,54 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function setRepoSourceMode(mode) {
+  state.repoSourceMode = mode === "manual" ? "manual" : "github";
+  document.querySelectorAll("[data-repo-source]").forEach((tab) => {
+    const active = tab.dataset.repoSource === state.repoSourceMode;
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
+  });
+  els.githubRepoSource.classList.toggle("hidden", state.repoSourceMode !== "github");
+  els.manualRepoSource.classList.toggle("hidden", state.repoSourceMode !== "manual");
+  els.repoName.value = "";
+  els.repoUrl.value = "";
+  els.remoteRepoSelect.value = "";
+}
+
+function openRepoModal() {
+  els.repoForm.reset();
+  els.repoBranch.value = "main";
+  setRepoSourceMode("github");
+  els.repoModal.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  window.setTimeout(() => els.loadGithubRepos.focus(), 0);
+}
+
+function renderRemoteRepositoryOptions(query = "") {
+  const normalized = query.trim().toLocaleLowerCase("pt-BR");
+  const matches = state.remoteRepos
+    .map((repo, index) => ({ repo, index }))
+    .filter(({ repo }) => !normalized || `${repo.name} ${repo.full_name}`.toLocaleLowerCase("pt-BR").includes(normalized));
+
+  els.remoteRepoSelect.innerHTML = [
+    `<option value="">${matches.length ? `Selecione um repositório (${matches.length})` : "Nenhum repositório encontrado"}</option>`,
+    ...matches.map(({ repo, index }) => `<option value="${index}">${escapeHtml(repo.full_name)} (${escapeHtml(repo.default_branch)})</option>`)
+  ].join("");
+  els.remoteRepoSelect.disabled = matches.length === 0;
+}
+
+function closeRepoModal() {
+  els.repoModal.classList.add("hidden");
+  document.body.classList.remove("modal-open");
+}
+
 document.addEventListener("click", async (event) => {
+  const repoSourceTab = event.target.closest("[data-repo-source]");
+  if (repoSourceTab) {
+    setRepoSourceMode(repoSourceTab.dataset.repoSource);
+    return;
+  }
+
   const routeLink = event.target.closest("[data-route]");
   if (routeLink) {
     event.preventDefault();
@@ -983,6 +1141,22 @@ els.backToWorkspaces.addEventListener("click", () => {
   showWorkspaceListScreen();
 });
 
+els.openRepoModal.addEventListener("click", openRepoModal);
+els.closeRepoModal.addEventListener("click", closeRepoModal);
+els.cancelRepoModal.addEventListener("click", closeRepoModal);
+els.repoModal.addEventListener("click", (event) => {
+  if (event.target === els.repoModal) closeRepoModal();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !els.repoModal.classList.contains("hidden")) closeRepoModal();
+});
+document.addEventListener("toggle", (event) => {
+  const details = event.target.closest?.("[data-pipeline-job]");
+  if (!details) return;
+  if (details.open) state.expandedIndexJobs.add(details.dataset.pipelineJob);
+  else state.expandedIndexJobs.delete(details.dataset.pipelineJob);
+}, true);
+
 els.workspaceForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   try {
@@ -1008,23 +1182,33 @@ els.loadGithubRepos.addEventListener("click", async () => {
   try {
     els.loadGithubRepos.disabled = true;
     els.loadGithubRepos.textContent = "Buscando...";
-    const owner = els.githubOwner.value.trim();
-    const data = await api(`/api/git/repositories${owner ? `?owner=${encodeURIComponent(owner)}` : ""}`);
+    const data = await api("/api/git/repositories");
     state.remoteRepos = data.repositories || [];
-    els.remoteRepoSelect.innerHTML = [
-      `<option value="">Selecionar repo listado ou informar manualmente</option>`,
-      ...state.remoteRepos.map((repo, index) => `<option value="${index}">${escapeHtml(repo.full_name)} (${escapeHtml(repo.default_branch)})</option>`)
-    ].join("");
+    els.githubRepoSearch.disabled = false;
+    els.githubRepoSearch.value = "";
+    renderRemoteRepositoryOptions();
+    els.githubRepoSearch.focus();
     toast(`${state.remoteRepos.length} repositorios carregados.`);
   } catch (error) {
     toast(error.message);
   } finally {
     els.loadGithubRepos.disabled = false;
-    els.loadGithubRepos.textContent = "Listar GitHub";
+    els.loadGithubRepos.textContent = "Carregar repositórios";
   }
 });
 
+els.githubRepoSearch.addEventListener("input", () => {
+  els.repoName.value = "";
+  els.repoUrl.value = "";
+  renderRemoteRepositoryOptions(els.githubRepoSearch.value);
+});
+
 els.remoteRepoSelect.addEventListener("change", () => {
+  if (els.remoteRepoSelect.value === "") {
+    els.repoName.value = "";
+    els.repoUrl.value = "";
+    return;
+  }
   const repo = state.remoteRepos[Number(els.remoteRepoSelect.value)];
   if (!repo) {
     return;
@@ -1051,8 +1235,17 @@ els.repoForm.addEventListener("submit", async (event) => {
     return;
   }
 
+  if (state.repoSourceMode === "github" && !els.remoteRepoSelect.value) {
+    toast("Busque e selecione um repositório do GitHub.");
+    return;
+  }
+  if (state.repoSourceMode === "manual" && (!els.repoName.value.trim() || !els.repoUrl.value.trim())) {
+    toast("Informe o nome e a URL de clone do repositório.");
+    return;
+  }
+
   try {
-    const button = els.repoForm.querySelector("button");
+    const button = els.repoForm.querySelector("[data-repo-submit]");
     button.disabled = true;
     button.textContent = "Clonando...";
     await api(`/api/workspaces/${encodeURIComponent(state.selectedWorkspace.slug)}/repositories`, {
@@ -1066,15 +1259,17 @@ els.repoForm.addEventListener("submit", async (event) => {
     });
     els.repoForm.reset();
     els.repoBranch.value = "main";
+    setRepoSourceMode(state.repoSourceMode);
+    closeRepoModal();
     toast("Repositorio clonado. Indexacao iniciada em background.");
     await loadWorkspaces();
     await selectWorkspace(state.selectedWorkspace.slug);
   } catch (error) {
     toast(error.message);
   } finally {
-    const button = els.repoForm.querySelector("button");
+    const button = els.repoForm.querySelector("[data-repo-submit]");
     button.disabled = false;
-    button.textContent = "Adicionar e clonar";
+    button.textContent = "Adicionar e indexar";
   }
 });
 
@@ -1097,7 +1292,13 @@ window.setInterval(async () => {
   } catch (error) {
     console.warn("index progress refresh failed", error);
   }
-}, 4000);
+}, 2000);
+
+// Mantem cronometro e taxas fluidos entre as consultas ao backend.
+window.setInterval(() => {
+  if (!state.selectedWorkspace || routeFromPath() !== "admin" || !state.indexJobs.running.some(isIndexJobRunning)) return;
+  renderIndexJobs();
+}, 1000);
 
 els.adminKey.value = localStorage.getItem("adminApiKey") || "";
 routeTo(routeFromPath());

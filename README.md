@@ -174,8 +174,9 @@ A Admin UI e o portal operacional da plataforma. Ela oferece:
 - adicao de repositorios GitHub com clone automatico
 - indexacao automatica de codigo por workspace apos o clone
 - acompanhamento em tempo real do progresso de indexacao do workspace e historico paginado
+- taxa de arquivos/chunks, tempo de processamento e progresso por etapa em tempo real durante a indexacao
 - bloqueio de reindexacao concorrente no mesmo repositorio e cancelamento de jobs ativos
-- relatorio de qualidade por repositorio com arquivos indexados, ignorados, erros, simbolos e relacoes
+- relatorio de qualidade por repositorio com score de cobertura, ultima execucao, arquivos, erros, simbolos e resolucao de relacoes
 - remocao do registro e da pasta clonada do repositorio
 
 Para listar repositorios GitHub pela interface, configure `GITHUB_TOKEN` no `.env`. Para restringir a uma organizacao/owner por padrao, configure `GITHUB_OWNER`.
