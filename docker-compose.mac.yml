@@ -36,17 +36,6 @@ services:
     networks:
       - ai-platform
 
-  ollama:
-    image: ${OLLAMA_IMAGE}
-    container_name: ai-ollama
-    restart: unless-stopped
-    volumes:
-      - ./data/ollama:/root/.ollama
-    ports:
-      - "${OLLAMA_PORT}:11434"
-    networks:
-      - ai-platform
-
   neo4j:
     image: ${NEO4J_IMAGE}
     container_name: ai-neo4j
@@ -74,7 +63,7 @@ services:
     environment:
       WEBUI_SECRET_KEY: ${OPEN_WEBUI_SECRET_KEY}
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
       VECTOR_DB: qdrant
       QDRANT_URI: http://qdrant:6333
       QDRANT_API_KEY: ${QDRANT_API_KEY}
@@ -86,8 +75,6 @@ services:
       postgres:
         condition: service_healthy
       qdrant:
-        condition: service_started
-      ollama:
         condition: service_started
     networks:
       - ai-platform
@@ -105,7 +92,7 @@ services:
       PORT: 7600
       POSTGRES_HOST: postgres
       POSTGRES_INTERNAL_PORT: 5432
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
       REPOS_ROOT: /repos
       ROSLYN_INDEXER_URL: http://roslyn-indexer:7201
     volumes:
@@ -119,8 +106,6 @@ services:
       open-webui:
         condition: service_started
       qdrant:
-        condition: service_started
-      ollama:
         condition: service_started
       neo4j:
         condition: service_started
@@ -199,7 +184,7 @@ services:
     environment:
       PORT: 7102
       SERVICE_NAME: code-mcp
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_BASE_URL: http://host.docker.internal:11434
     depends_on:
       postgres:
         condition: service_healthy

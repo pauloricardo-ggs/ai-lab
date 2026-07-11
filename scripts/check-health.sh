@@ -5,6 +5,7 @@ source .env
 
 ADMIN_PORT="${ADMIN_PORT:-8080}"
 OLLAMA_PORT="${OLLAMA_PORT:-11434}"
+INSTALL_TARGET="${INSTALL_TARGET:-linux}"
 
 docker_cmd() {
   if docker info >/dev/null 2>&1; then
@@ -37,7 +38,12 @@ curl -fsS "http://localhost:${QDRANT_HTTP_PORT}/collections" \
 echo ""
 
 echo "Verificando Ollama..."
-curl -fsS "http://localhost:${OLLAMA_PORT}/api/tags" >/dev/null && echo "Ollama OK"
+if [ "$INSTALL_TARGET" = "mac" ]; then
+  OLLAMA_HEALTH_URL="http://localhost:11434"
+else
+  OLLAMA_HEALTH_URL="http://localhost:${OLLAMA_PORT}"
+fi
+curl -fsS "${OLLAMA_HEALTH_URL}/api/tags" >/dev/null && echo "Ollama OK"
 echo ""
 
 echo "Verificando Neo4j..."
@@ -45,7 +51,11 @@ curl -fsS "http://localhost:${NEO4J_HTTP_PORT}" >/dev/null && echo "Neo4j OK"
 echo ""
 
 echo "Verificando MCP Gateway..."
-curl -fsS "http://localhost:${MCP_GATEWAY_PORT}/health" >/dev/null && echo "MCP Gateway OK"
+curl -fsS -X POST "http://localhost:${MCP_GATEWAY_PORT}/mcp" \
+  -H "Authorization: Bearer ${GATEWAY_API_KEY}" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -d '{"jsonrpc":"2.0","id":"health","method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"health-check","version":"1.0.0"}}}' >/dev/null && echo "MCP Gateway OK"
 echo ""
 
 echo "Health check finalizado."

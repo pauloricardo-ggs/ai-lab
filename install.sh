@@ -2,6 +2,8 @@
 set -euo pipefail
 
 PROJECT_NAME="AI Knowledge Platform"
+INSTALL_TARGET="linux"
+COMPOSE_FILE_ARGS=()
 
 echo ""
 echo "======================================"
@@ -11,6 +13,36 @@ echo ""
 
 require_command() {
   command -v "$1" >/dev/null 2>&1
+}
+
+select_install_target() {
+  local choice=""
+
+  echo "Sistema de instalacao:"
+  echo "1) Linux/servidor com Ollama em container (padrao)"
+  echo "2) macOS Apple Silicon com Ollama nativo no host"
+  echo ""
+
+  while true; do
+    read -r -p "Escolha [1]: " choice
+    choice="${choice:-1}"
+
+    case "$choice" in
+      1|linux|Linux|LINUX)
+        INSTALL_TARGET="linux"
+        COMPOSE_FILE_ARGS=()
+        return
+        ;;
+      2|mac|Mac|MAC|macos|macOS)
+        INSTALL_TARGET="mac"
+        COMPOSE_FILE_ARGS=(-f docker-compose.mac.yml)
+        return
+        ;;
+      *)
+        echo "Opcao invalida. Use 1 para Linux ou 2 para macOS."
+        ;;
+    esac
+  done
 }
 
 ask_required() {
@@ -38,6 +70,15 @@ ask_default() {
 
 generate_secret() {
   openssl rand -hex 32
+}
+
+detect_server_host() {
+  if hostname -I >/dev/null 2>&1; then
+    hostname -I | awk '{print $1}'
+    return
+  fi
+
+  echo "localhost"
 }
 
 ensure_env_default() {
@@ -88,11 +129,22 @@ mask_value() {
   fi
 }
 
+should_prompt_env_var() {
+  local var_name="$1"
+
+  if [ "$INSTALL_TARGET" = "mac" ]; then
+    [[ "$var_name" == "OLLAMA_IMAGE" || "$var_name" == "OLLAMA_PORT" || "$var_name" == "OLLAMA_BASE_URL" ]] && return 1
+  fi
+
+  return 0
+}
+
 prompt_existing_env_values() {
   local line var example_value current display value
   while IFS= read -r line <&3 || [ -n "$line" ]; do
     [[ "$line" =~ ^[[:space:]]*# || -z "$line" || "$line" != *=* ]] && continue
     var="${line%%=*}"
+    should_prompt_env_var "$var" || continue
     example_value="${line#*=}"
     current="$(env_value "$var")"
     if [ -z "$current" ]; then current="$example_value"; fi
@@ -126,6 +178,11 @@ install_docker_if_needed() {
     return
   fi
 
+  if [ "$INSTALL_TARGET" = "mac" ]; then
+    echo "Docker nao encontrado. No macOS, instale e inicie o Docker Desktop antes de continuar."
+    exit 1
+  fi
+
   echo "Docker nao encontrado. Instalando Docker..."
   sudo apt update
   sudo apt install -y ca-certificates curl gnupg
@@ -154,7 +211,7 @@ docker_cmd() {
 }
 
 compose_cmd() {
-  docker_cmd compose "$@"
+  docker_cmd compose "${COMPOSE_FILE_ARGS[@]}" "$@"
 }
 
 env_value() {
@@ -164,13 +221,19 @@ env_value() {
 
 wait_for_ollama() {
   local attempts=30
+  local ollama_url=""
   local ollama_port=""
 
-  ollama_port="$(env_value OLLAMA_PORT)"
-  ollama_port="${ollama_port:-11434}"
+  if [ "$INSTALL_TARGET" = "mac" ]; then
+    ollama_url="http://localhost:11434"
+  else
+    ollama_port="$(env_value OLLAMA_PORT)"
+    ollama_port="${ollama_port:-11434}"
+    ollama_url="http://localhost:${ollama_port}"
+  fi
 
   for _ in $(seq 1 "$attempts"); do
-    if curl -fsS "http://localhost:${ollama_port}/api/tags" >/dev/null 2>&1; then
+    if curl -fsS "${ollama_url}/api/tags" >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
@@ -202,6 +265,12 @@ pull_ollama_models() {
   echo "Aguardando Ollama..."
   wait_for_ollama
 
+  if [ "$INSTALL_TARGET" = "mac" ]; then
+    echo "Modo macOS: usando Ollama nativo do host. O instalador nao baixa modelos nem cria container Ollama."
+    echo "Confirme no host que os modelos configurados existem: $chat_model e $embedding_model"
+    return 0
+  fi
+
   echo ""
   echo "Baixando modelos locais configurados..."
   pull_ollama_model "$chat_model"
@@ -212,6 +281,10 @@ pull_ollama_models() {
 }
 
 echo "Este script ira preparar o servidor e subir a stack Docker."
+echo ""
+
+select_install_target
+echo "Alvo selecionado: $INSTALL_TARGET"
 echo ""
 
 updating_existing_env=false
@@ -234,7 +307,9 @@ if [ ! -f ".env" ]; then
   ask_default "QDRANT_IMAGE" "Imagem Qdrant" "qdrant/qdrant:v1.17.1"
   ask_default "NEO4J_IMAGE" "Imagem Neo4j" "neo4j:5.26.8"
   ask_default "OPEN_WEBUI_IMAGE" "Imagem Open WebUI" "ghcr.io/open-webui/open-webui:v0.10.2"
-  ask_default "OLLAMA_IMAGE" "Imagem Ollama" "ollama/ollama:0.22.1"
+  if [ "$INSTALL_TARGET" = "linux" ]; then
+    ask_default "OLLAMA_IMAGE" "Imagem Ollama" "ollama/ollama:0.22.1"
+  fi
   ask_default "NODE_IMAGE" "Imagem Node" "node:22.17.0-alpine"
   ask_default "DOTNET_SDK_IMAGE" "Imagem .NET SDK" "mcr.microsoft.com/dotnet/sdk:8.0"
   ask_default "DOTNET_ASPNET_IMAGE" "Imagem .NET ASP.NET" "mcr.microsoft.com/dotnet/aspnet:8.0"
@@ -246,7 +321,12 @@ if [ ! -f ".env" ]; then
   ask_default "OPEN_WEBUI_PORT" "Porta Open WebUI" "3000"
   ask_default "MCP_GATEWAY_PORT" "Porta MCP Gateway" "7000"
   ask_default "ADMIN_PORT" "Porta Admin UI" "8080"
-  ask_default "OLLAMA_PORT" "Porta Ollama" "11434"
+  if [ "$INSTALL_TARGET" = "mac" ]; then
+    echo "OLLAMA_BASE_URL=http://host.docker.internal:11434" >> .env
+  else
+    ask_default "OLLAMA_PORT" "Porta Ollama" "11434"
+    ask_default "OLLAMA_BASE_URL" "URL interna do Ollama para os containers" "http://ollama:11434"
+  fi
   ask_default "POSTGRES_DB" "Nome do banco PostgreSQL" "ai_platform"
   ask_default "POSTGRES_USER" "Usuario PostgreSQL" "ai_platform"
   echo "POSTGRES_PASSWORD=$(generate_secret)" >> .env
@@ -276,6 +356,10 @@ ensure_env_default "NODE_IMAGE" "node:22.17.0-alpine"
 ensure_env_default "DOTNET_SDK_IMAGE" "mcr.microsoft.com/dotnet/sdk:8.0"
 ensure_env_default "DOTNET_ASPNET_IMAGE" "mcr.microsoft.com/dotnet/aspnet:8.0"
 ensure_env_default "OLLAMA_PORT" "11434"
+ensure_env_default "OLLAMA_BASE_URL" "http://ollama:11434"
+if [ "$INSTALL_TARGET" = "mac" ]; then
+  set_env_value "OLLAMA_BASE_URL" "http://host.docker.internal:11434"
+fi
 ensure_env_default "LLM_PROVIDER" "ollama"
 ensure_env_default "LOCAL_CHAT_MODEL" "qwen2.5:7b-instruct"
 ensure_env_default "EMBEDDING_MODEL" "nomic-embed-text"
@@ -353,9 +437,13 @@ chmod +x scripts/create-qdrant-collections.sh
 echo ""
 echo "Executando health check..."
 chmod +x scripts/check-health.sh
-./scripts/check-health.sh
+if [ "$INSTALL_TARGET" = "mac" ]; then
+  INSTALL_TARGET="$INSTALL_TARGET" COMPOSE_FILE="docker-compose.mac.yml" ./scripts/check-health.sh
+else
+  INSTALL_TARGET="$INSTALL_TARGET" ./scripts/check-health.sh
+fi
 
-SERVER_IP=$(hostname -I | awk '{print $1}')
+SERVER_IP="$(detect_server_host)"
 
 echo ""
 echo "======================================"
@@ -378,7 +466,11 @@ echo "MCP Gateway:"
 echo "http://$SERVER_IP:$(grep '^MCP_GATEWAY_PORT=' .env | cut -d '=' -f2)"
 echo ""
 echo "Ollama:"
-echo "http://$SERVER_IP:$(grep '^OLLAMA_PORT=' .env | cut -d '=' -f2)"
+if [ "$INSTALL_TARGET" = "mac" ]; then
+  echo "$(grep '^OLLAMA_BASE_URL=' .env | tail -n 1 | cut -d '=' -f2-)"
+else
+  echo "http://$SERVER_IP:$(grep '^OLLAMA_PORT=' .env | cut -d '=' -f2)"
+fi
 echo ""
 echo "Proximos passos manuais:"
 echo ""
