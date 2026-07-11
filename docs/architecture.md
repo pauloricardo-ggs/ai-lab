@@ -26,6 +26,12 @@ A Admin UI e a fonte operacional para workspaces corporativos e repositorios tec
 
 O Open WebUI continua sendo usado para chat, modelos e Knowledge Bases documentais. Ele nao e tratado como dono do workspace tecnico da plataforma.
 
+As Knowledge Bases documentais sao dominios independentes dos workspaces tecnicos.
+O Open WebUI preserva sua associacao `knowledge_id -> file_id`, controla acesso e
+grava seus proprios vetores no Qdrant. O Docling e um sidecar stateless de
+extracao: nao conhece workspaces do Admin Panel, nao escolhe a base e nao grava
+documentos nas tabelas da plataforma.
+
 ## Politica de Modelos
 
 O servidor deve executar modelos locais/open source. O runtime padrao e Ollama. O instalador nao deve exigir chave OpenAI ou qualquer provedor externo.

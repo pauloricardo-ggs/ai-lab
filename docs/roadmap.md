@@ -360,10 +360,10 @@ Implementado/configurado:
 
 Pendente/decisao futura:
 
-- Vincular workspaces do Open WebUI com workspaces locais da plataforma.
-- Criar sincronizacao de bases de conhecimento/documentos do Open WebUI para tabelas locais.
+- Manter Knowledge Bases do Open WebUI independentes dos workspaces tecnicos por decisao de arquitetura.
+- Nao sincronizar documentos do Open WebUI para tabelas locais; o Open WebUI permanece como autoridade documental.
 - Corrigir experiencia de referencias de documentos quando links internos do Open WebUI nao abrirem corretamente.
-- Avaliar OCR para PDFs escaneados.
+- Docling Serve integrado ao Open WebUI com OCR seletivo para PDFs escaneados e imagens.
 
 ## Lacunas Tecnicas Conhecidas
 
@@ -378,8 +378,8 @@ Pendente/decisao futura:
 9. Nao ha reverse proxy/HTTPS pronto para exposicao fora da rede interna.
 10. Observabilidade ainda e basica.
 11. Backup existe, mas restore/runbook precisa ser detalhado e testado.
-12. OCR de documentos escaneados ainda nao foi implementado.
-13. Open WebUI e workspaces locais ainda nao estao sincronizados.
+12. Descricao semantica de graficos/figuras ainda nao foi habilitada; OCR textual ja e executado pelo Docling no fluxo do Open WebUI.
+13. Open WebUI e workspaces locais nao sao sincronizados por decisao de arquitetura e representam dominios distintos.
 14. Worker `tree-sitter-indexer` ainda e conceitual/documentado, nao integrado.
 
 ## Roadmap Recomendado
@@ -472,13 +472,16 @@ Arquivos provaveis:
 - `apps/git-mcp/src/index.js`
 - `docs/mcp-tools.md`
 
-### Fase 4 - Knowledge MCP Real
+### Fase 4 - Knowledge MCP Real (fora do fluxo documental atual)
 
-Objetivo: tornar documentos consultaveis pelo MCP com escopo de workspace.
+Decisao: regras de negocio e documentos permanecem nas Knowledge Bases do Open
+WebUI. O Admin Panel e os MCPs permanecem focados no dominio tecnico. Esta fase so
+deve ser retomada se surgir um caso de uso explicito para documentos tecnicos
+gerenciados por workspace; ela nao deve ingerir ou espelhar as bases do Open WebUI.
 
 Itens:
 
-- Definir se documentos serao ingeridos via pipeline proprio, Open WebUI ou ambos.
+- Se futuramente aprovado, implementar um pipeline proprio e independente para documentos tecnicos:
 - Implementar ingestion local para documentos:
   - upload
   - extracao de texto
@@ -493,7 +496,6 @@ Itens:
   - `knowledge.search_business_rules`
   - `knowledge.search_embeddings`
 - Retornar citacoes com documento, chunk, pagina quando disponivel.
-- Resolver problema de referencias/documentos que retornam 404 no Open WebUI.
 
 Criterios de aceite:
 
@@ -510,28 +512,22 @@ Arquivos provaveis:
 - `scripts/init-db.sql`
 - `docs/indexing.md`
 
-### Fase 5 - Open WebUI e Workspaces
+### Fase 5 - Open WebUI e Workspaces (decisao concluida)
 
-Objetivo: reduzir confusao entre workspaces locais e Open WebUI.
+Objetivo: manter os dominios separados e tornar essa separacao explicita.
 
 Itens:
 
-- Investigar modelo de dados atual do Open WebUI usado na stack.
-- Decidir estrategia:
-  - sincronizar workspaces locais para Open WebUI
-  - mapear workspaces do Open WebUI para workspaces locais
-  - manter separado, mas explicitar UI/UX
-- Se sincronizar:
-  - criar tabela de mapeamento
-  - criar rotina de sync
-  - documentar autoridade de criacao/edicao
-- Exibir no Admin UI status de vinculo com Open WebUI.
+- Open WebUI e autoridade sobre Knowledge Bases, documentos e permissoes documentais.
+- Admin Panel e autoridade sobre workspaces tecnicos, repositorios e codigo.
+- Nao criar tabela de mapeamento nem rotina de sincronizacao entre esses dominios.
+- Manter a decisao explicita no README e na documentacao de arquitetura.
 
 Criterios de aceite:
 
 - Usuario entende em qual workspace esta enviando documentos.
-- Admin consegue ver se workspace local tem equivalente no Open WebUI.
-- Nao ha vazamento de documentos entre workspaces.
+- Admin entende que nao existe equivalente automatico no Open WebUI.
+- O teste de isolamento entre Knowledge Bases nao recupera conteudo cruzado.
 
 Arquivos provaveis:
 
@@ -540,18 +536,16 @@ Arquivos provaveis:
 - `docs/workspaces.md`
 - `README.md`
 
-### Fase 6 - OCR e Qualidade de Documentos
+### Fase 6 - OCR e Qualidade de Documentos (OCR base implementado)
 
 Objetivo: suportar PDFs escaneados e documentos de baixa qualidade.
 
 Itens:
 
-- Adicionar OCR local.
-- Escolher engine local:
-  - Tesseract
-  - PaddleOCR
-  - outro modelo local compatvel com Docker
-- Detectar PDF escaneado vs texto extraivel.
+- Docling Serve integrado como sidecar do Open WebUI.
+- EasyOCR local configurado para portugues e ingles.
+- OCR seletivo (`force_ocr=false`) para preservar a camada textual quando existente.
+- Extracao de layout e tabelas em modo preciso.
 - Preservar pagina, bounding boxes quando possivel e texto original.
 - Adicionar relatorio de qualidade de documento:
   - paginas processadas
@@ -563,15 +557,14 @@ Itens:
 Criterios de aceite:
 
 - PDF escaneado com informacao na primeira pagina gera texto recuperavel.
-- Knowledge MCP encontra informacoes presentes em imagem/OCR.
+- Open WebUI encontra informacoes textuais presentes em imagem/OCR dentro da base correta.
 - Usuario consegue diagnosticar quando OCR falhou.
 
 Arquivos provaveis:
 
-- `workers/document-ingestion/`
-- `workers/embedding-worker/`
-- `apps/admin/`
-- `docs/indexing.md`
+- `docker-compose.yml`
+- `docker-compose.mac.yml`
+- `docs/open-webui-documents.md`
 
 ### Fase 7 - Explorador de Grafo no Admin
 
@@ -719,12 +712,13 @@ Arquivos provaveis:
 
 ### Documentos
 
-- Definir pipeline unico de ingestao.
-- Implementar OCR local.
+- Manter o Open WebUI como pipeline e autoridade documental.
+- Validar OCR local com corpus real e medir qualidade.
 - Melhorar chunking de contratos/tabelas.
 - Armazenar pagina e offset.
 - Corrigir referencias/citacoes.
 - Criar relatorio de qualidade de documentos.
+- Avaliar descricao visual de graficos e diagramas com modelo local.
 
 ### MCP
 
@@ -739,8 +733,6 @@ Arquivos provaveis:
 ### Admin UI
 
 - Explorador de grafo.
-- Tela de documentos por workspace.
-- Tela de vinculo com Open WebUI.
 - Update/pull de repositorio.
 - Visualizar commit indexado.
 - Visualizar logs recentes por job.
@@ -773,9 +765,9 @@ Ordem recomendada para proximos agentes:
 2. `code.explain_architecture` real.
 3. Update/pull incremental de repositorios.
 4. Git MCP real.
-5. Knowledge MCP real.
-6. Integracao/sincronizacao com Open WebUI.
-7. OCR local para PDFs escaneados.
+5. Validar Docling/OCR e isolamento com corpus documental real.
+6. Melhorar citacoes e chunking documental nas configuracoes do Open WebUI.
+7. Avaliar descricao local de graficos e diagramas.
 8. Explorador visual do grafo.
 9. RBAC/SSO.
 10. Observabilidade e hardening de deploy.
@@ -785,8 +777,8 @@ Justificativa:
 - A indexacao virou o nucleo tecnico da plataforma; sem testes, cada nova melhoria pode quebrar extratores e resolucao.
 - `code.explain_architecture` desbloqueia valor imediato para agentes tecnicos.
 - Update Git incremental e Git MCP tornam o indice sustentavel em uso diario.
-- Knowledge MCP e Open WebUI fecham o ciclo de documentos.
-- OCR, grafo visual e seguranca ampliam qualidade e operacao.
+- Open WebUI e Docling fecham o ciclo de documentos sem acoplar o dominio tecnico.
+- Validacao de OCR, grafo visual e seguranca ampliam qualidade e operacao.
 
 ## Contratos e Cuidados para Agentes
 

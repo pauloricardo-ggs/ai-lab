@@ -168,6 +168,7 @@ create_directories() {
     data/neo4j/import \
     data/neo4j/plugins \
     data/open-webui \
+    data/docling \
     data/ollama \
     data/repos \
     backups
@@ -307,6 +308,7 @@ if [ ! -f ".env" ]; then
   ask_default "QDRANT_IMAGE" "Imagem Qdrant" "qdrant/qdrant:v1.17.1"
   ask_default "NEO4J_IMAGE" "Imagem Neo4j" "neo4j:5.26.8"
   ask_default "OPEN_WEBUI_IMAGE" "Imagem Open WebUI" "ghcr.io/open-webui/open-webui:v0.10.2"
+  ask_default "DOCLING_IMAGE" "Imagem Docling Serve" "quay.io/docling-project/docling-serve:v1.18.0"
   if [ "$INSTALL_TARGET" = "linux" ]; then
     ask_default "OLLAMA_IMAGE" "Imagem Ollama" "ollama/ollama:0.22.1"
   fi
@@ -319,6 +321,7 @@ if [ ! -f ".env" ]; then
   ask_default "NEO4J_HTTP_PORT" "Porta HTTP Neo4j" "7474"
   ask_default "NEO4J_BOLT_PORT" "Porta Bolt Neo4j" "7687"
   ask_default "OPEN_WEBUI_PORT" "Porta Open WebUI" "3000"
+  ask_default "DOCLING_PORT" "Porta Docling (diagnostico/UI)" "5001"
   ask_default "MCP_GATEWAY_PORT" "Porta MCP Gateway" "7000"
   ask_default "ADMIN_PORT" "Porta Admin UI" "8080"
   if [ "$INSTALL_TARGET" = "mac" ]; then
@@ -350,6 +353,17 @@ ensure_env_default "POSTGRES_PASSWORD" "$(generate_secret)"
 ensure_env_default "QDRANT_API_KEY" "$(generate_secret)"
 ensure_env_default "NEO4J_PASSWORD" "$(generate_secret)"
 ensure_env_default "OPEN_WEBUI_SECRET_KEY" "$(generate_secret)"
+ensure_env_default "DOCLING_IMAGE" "quay.io/docling-project/docling-serve:v1.18.0"
+ensure_env_default "DOCLING_PORT" "5001"
+ensure_env_default "CONTENT_EXTRACTION_ENGINE" "docling"
+ensure_env_default "DOCLING_SERVER_URL" "http://docling:5001"
+ensure_env_default "DOCLING_PARAMS" '{"do_ocr":true,"force_ocr":false,"ocr_engine":"easyocr","ocr_lang":["pt","en"],"pdf_backend":"dlparse_v4","table_mode":"accurate","pipeline":"standard"}'
+ensure_env_default "DOCLING_MAX_SYNC_WAIT" "600"
+ensure_env_default "DOCLING_NUM_WORKERS" "1"
+ensure_env_default "DOCLING_CPU_THREADS" "4"
+ensure_env_default "RAG_EMBEDDING_ENGINE" "ollama"
+ensure_env_default "ENABLE_RAG_HYBRID_SEARCH" "true"
+ensure_env_default "ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS" "true"
 ensure_env_default "GATEWAY_API_KEY" "$(generate_secret)"
 ensure_env_default "OLLAMA_IMAGE" "ollama/ollama:0.22.1"
 ensure_env_default "NODE_IMAGE" "node:22.17.0-alpine"

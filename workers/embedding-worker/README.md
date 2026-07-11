@@ -1,6 +1,8 @@
 # embedding-worker
 
-Responsavel por gerar embeddings de documentos e codigo.
+Componente reservado para embeddings do pipeline tecnico da plataforma. Os
+embeddings de Knowledge Bases e regras de negocio sao gerados pelo Open WebUI e
+nao devem ser duplicados por este worker.
 
 ## Collections
 
@@ -28,4 +30,3 @@ Responsavel por gerar embeddings de documentos e codigo.
 - atualizar `qdrant_point_id` no PostgreSQL apos gravar vetor
 - usar `EMBEDDING_MODEL` e `EMBEDDING_VECTOR_SIZE` do ambiente
 - filtrar qualquer consulta por workspace
-

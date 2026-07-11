@@ -28,6 +28,10 @@ echo "Verificando Open WebUI..."
 curl -fsS "http://localhost:${OPEN_WEBUI_PORT}" >/dev/null && echo "Open WebUI OK"
 echo ""
 
+echo "Verificando Docling..."
+curl -fsS "http://localhost:${DOCLING_PORT:-5001}/docs" >/dev/null && echo "Docling OK"
+echo ""
+
 echo "Verificando Admin UI..."
 curl -fsS "http://localhost:${ADMIN_PORT}/health" >/dev/null && echo "Admin UI OK"
 echo ""

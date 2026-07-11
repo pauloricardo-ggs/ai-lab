@@ -5,6 +5,7 @@
 Esta plataforma sobe uma stack interna composta por:
 
 - Open WebUI
+- Docling Serve (extracao estruturada, tabelas e OCR)
 - Ollama
 - PostgreSQL
 - Qdrant
@@ -67,7 +68,7 @@ Apos a instalacao, o administrador deve:
 4. Acessar a Admin UI.
 5. Criar os workspaces corporativos.
 6. Adicionar repositorios aos workspaces.
-7. Criar as bases de conhecimento no Open WebUI.
+7. Criar as bases de conhecimento no Open WebUI; elas sao independentes dos workspaces tecnicos.
 8. Configurar credenciais de acesso ao GitHub quando necessario.
 9. Configurar os agentes MCP, como Codex ou Claude, apontando para o MCP Gateway.
 
@@ -78,6 +79,7 @@ Nenhum workspace default e criado automaticamente.
 Considerando portas padrao:
 
 - Open WebUI: `http://<IP_DO_SERVIDOR>:3000`
+- Docling UI (diagnostico): `http://<IP_DO_SERVIDOR>:5001/ui`
 - Admin UI: `http://<IP_DO_SERVIDOR>:8080`
 - Ollama: `http://<IP_DO_SERVIDOR>:11434`
 - Qdrant Dashboard: `http://<IP_DO_SERVIDOR>:6333/dashboard`
@@ -131,6 +133,7 @@ Edite `.env` e troque explicitamente:
 ```dotenv
 QDRANT_IMAGE=qdrant/qdrant:vX.Y.Z
 OPEN_WEBUI_IMAGE=ghcr.io/open-webui/open-webui:vX.Y.Z
+DOCLING_IMAGE=quay.io/docling-project/docling-serve:vX.Y.Z
 POSTGRES_IMAGE=postgres:X.Y-alpine
 NEO4J_IMAGE=neo4j:X.Y.Z
 DOTNET_SDK_IMAGE=mcr.microsoft.com/dotnet/sdk:X.Y
@@ -234,6 +237,20 @@ docker exec -it ai-ollama ollama pull nomic-embed-text
 Para trocar modelos, edite `LOCAL_CHAT_MODEL` e `EMBEDDING_MODEL` no `.env` antes de executar o install, ou rode `docker exec -it ai-ollama ollama pull <modelo>` manualmente depois.
 
 O Open WebUI responde aos usuarios usando os modelos locais configurados. Quando os MCPs responderem a agentes externos, eles tambem devem consultar apenas dados indexados localmente e modelos locais quando precisarem de inferencia no servidor.
+
+## Documentos no Open WebUI
+
+O Open WebUI e a autoridade sobre documentos e regras de negocio. Suas Knowledge
+Bases nao sao vinculadas aos workspaces tecnicos do Admin Panel e o Docling nao
+altera essa separacao: ele somente devolve ao Open WebUI texto estruturado, tabelas
+e OCR. A associacao do arquivo, as permissoes, os chunks e os embeddings continuam
+sob responsabilidade do Open WebUI.
+
+A stack configura Docling como extrator, com OCR seletivo em portugues/ingles,
+tabelas em modo preciso e busca hibrida. Consulte
+[`docs/open-webui-documents.md`](docs/open-webui-documents.md) para configuracao,
+migracao de instalacoes existentes, reprocessamento, diagnostico e teste de
+isolamento entre bases.
 
 ## Indexacao de Repositorios
 
