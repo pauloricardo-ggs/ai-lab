@@ -116,6 +116,26 @@ Durante a reindexacao:
 8. erros isolados por arquivo ficam no inventario e aparecem no relatorio de qualidade
 9. relacoes do workspace sao re-resolvidas para refletir arquivos, simbolos e repositorios novos, alterados ou removidos
 
+## Reconciliacao periodica de repositorios
+
+O Admin verifica periodicamente a branch configurada de cada clone sem expor
+nenhum endpoint ao GitHub. A consulta usa o mesmo `GITHUB_TOKEN` ja configurado e
+executa `git ls-remote` somente de saida. Quando o SHA remoto difere de
+`repositories.indexed_commit_sha`, um job incremental e colocado na fila com
+`requested_by = repository-reconciler`. Repositorios com job ativo nao recebem
+jobs duplicados.
+
+```dotenv
+REPOSITORY_RECONCILER_ENABLED=true
+REPOSITORY_RECONCILER_INTERVAL_MINUTES=60
+REPOSITORY_RECONCILER_INITIAL_DELAY_SECONDS=60
+```
+
+Cada verificacao registra em `repositories.metadata.reconciler` o horario, SHA
+remoto, deteccao de mudanca, job criado ou erro sanitizado. O estado global fica
+em `GET /api/reconciler`; `POST /api/reconciler/run` dispara uma verificacao
+administrativa imediata.
+
 ## Testes do Roslyn Indexer
 
 A extracao C# e isolada em `RoslynCodeAnalyzer`, permitindo testar o mesmo codigo usado pelo endpoint `/analyze` sem subir o servico. A suite cobre simbolos e hierarquia, linhas, tipos C#, imports, heranca, chamadas, criacao de objetos, codigo parcialmente nao resolvido e entrada vazia.

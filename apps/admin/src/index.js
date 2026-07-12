@@ -132,10 +132,14 @@ const neo4jTimeoutMs = Math.max(1_000, Number(process.env.NEO4J_TIMEOUT_MS || 12
 const indexFileTimeoutMs = Math.max(1_000, Number(process.env.INDEX_FILE_TIMEOUT_MS || 1200000));
 const indexIgnoreMigrations = String(process.env.INDEX_IGNORE_MIGRATIONS || "true").toLowerCase() !== "false";
 const configuredIndexConcurrency = Math.min(3, Math.max(1, Number(process.env.INDEX_MAX_CONCURRENT_REPOSITORIES || 1)));
+const repositoryReconcilerEnabled = String(process.env.REPOSITORY_RECONCILER_ENABLED || "true").toLowerCase() !== "false";
+const repositoryReconcilerIntervalMs = Math.max(60_000, Number(process.env.REPOSITORY_RECONCILER_INTERVAL_MINUTES || 60) * 60_000);
+const repositoryReconcilerInitialDelayMs = Math.max(5_000, Number(process.env.REPOSITORY_RECONCILER_INITIAL_DELAY_SECONDS || 60) * 1_000);
 const activeIndexJobs = new Map();
 const activeIndexStatuses = ["queued", "running", "paused", "canceling"];
 const processStartedAt = Date.now();
 const httpMetrics = { requests: 0, errors: 0, durationsMs: 0, byRoute: new Map() };
+const reconcilerState = { running: false, lastStartedAt: null, lastFinishedAt: null, checked: 0, changed: 0, enqueued: 0, errors: 0 };
 
 class IndexCanceledError extends Error {
   constructor() {
@@ -1382,6 +1386,71 @@ async function enqueueRepositoryIndex(workspace, repository, requestedBy = "admi
   );
   void runIndexScheduler();
   return result.rows[0].id;
+}
+
+async function reconcileRepositories() {
+  if (!repositoryReconcilerEnabled || reconcilerState.running) return { ...reconcilerState, skipped: true };
+  reconcilerState.running = true;
+  reconcilerState.lastStartedAt = new Date().toISOString();
+  const run = { checked: 0, changed: 0, enqueued: 0, errors: 0 };
+  try {
+    const repositories = await query(
+      `SELECT r.id, r.workspace_id, r.name, r.local_path, r.default_branch, r.status,
+              r.indexed_commit_sha, r.metadata, w.slug AS workspace_slug, w.name AS workspace_name
+       FROM repositories r JOIN workspaces w ON w.id = r.workspace_id
+       WHERE r.local_path IS NOT NULL AND r.status NOT IN ('cloning', 'error')
+       ORDER BY r.updated_at ASC`
+    );
+    for (const repository of repositories.rows) {
+      run.checked += 1;
+      const checkedAt = new Date().toISOString();
+      try {
+        if (!existsSync(repository.local_path)) throw new Error("repository_local_path_not_found");
+        const branch = repository.default_branch || "main";
+        const remote = await runGit(repository.local_path, ["ls-remote", "--heads", "origin", `refs/heads/${branch}`], { allowFailure: true });
+        if (remote.code !== 0) throw new Error(remote.stderr || "repository_remote_check_failed");
+        const remoteCommit = remote.stdout.split(/\s+/)[0] || null;
+        if (!remoteCommit) throw new Error("repository_remote_branch_not_found");
+        const changed = remoteCommit !== repository.indexed_commit_sha;
+        if (changed) run.changed += 1;
+        let jobId = null;
+        if (changed && !(await findActiveRepositoryIndex(repository.id))) {
+          jobId = await enqueueRepositoryIndex(
+            { id: repository.workspace_id, slug: repository.workspace_slug, name: repository.workspace_name },
+            repository,
+            "repository-reconciler"
+          );
+          run.enqueued += 1;
+          await query("UPDATE repositories SET status = 'index_queued', updated_at = NOW() WHERE id = $1", [repository.id]);
+        }
+        await query(
+          `UPDATE repositories SET metadata = metadata || $2::jsonb WHERE id = $1`,
+          [repository.id, JSON.stringify({ reconciler: { checked_at: checkedAt, remote_commit_sha: remoteCommit, changed, job_id: jobId, error: null } })]
+        );
+      } catch (error) {
+        run.errors += 1;
+        await query(
+          `UPDATE repositories SET metadata = metadata || $2::jsonb WHERE id = $1`,
+          [repository.id, JSON.stringify({ reconciler: { checked_at: checkedAt, error: sanitizeSecret(error instanceof Error ? error.message : "reconciliation_failed") } })]
+        ).catch(() => {});
+        console.error(`repository reconciliation failed: ${repository.name}`, error instanceof Error ? error.message : error);
+      }
+    }
+    return { ...run, skipped: false };
+  } finally {
+    Object.assign(reconcilerState, run, { running: false, lastFinishedAt: new Date().toISOString() });
+  }
+}
+
+function repositoryReconcilerStatus() {
+  const lastFinished = reconcilerState.lastFinishedAt ? Date.parse(reconcilerState.lastFinishedAt) : null;
+  return {
+    enabled: repositoryReconcilerEnabled,
+    interval_minutes: Math.round(repositoryReconcilerIntervalMs / 60_000),
+    initial_delay_seconds: Math.round(repositoryReconcilerInitialDelayMs / 1_000),
+    ...reconcilerState,
+    next_run_at: repositoryReconcilerEnabled && lastFinished ? new Date(lastFinished + repositoryReconcilerIntervalMs).toISOString() : null
+  };
 }
 
 async function getQueueSettings() {
@@ -3732,7 +3801,19 @@ function prometheusMetrics() {
     `ai_admin_http_request_duration_seconds_sum ${(httpMetrics.durationsMs / 1000).toFixed(3)}`,
     "# HELP ai_admin_index_jobs_active Active in-process indexing jobs.",
     "# TYPE ai_admin_index_jobs_active gauge",
-    `ai_admin_index_jobs_active ${activeIndexJobs.size}`
+    `ai_admin_index_jobs_active ${activeIndexJobs.size}`,
+    "# HELP ai_admin_repository_reconciler_running Whether the repository reconciler is running.",
+    "# TYPE ai_admin_repository_reconciler_running gauge",
+    `ai_admin_repository_reconciler_running ${reconcilerState.running ? 1 : 0}`,
+    "# HELP ai_admin_repository_reconciler_checked Repositories checked in the last run.",
+    "# TYPE ai_admin_repository_reconciler_checked gauge",
+    `ai_admin_repository_reconciler_checked ${reconcilerState.checked}`,
+    "# HELP ai_admin_repository_reconciler_enqueued Index jobs enqueued in the last run.",
+    "# TYPE ai_admin_repository_reconciler_enqueued gauge",
+    `ai_admin_repository_reconciler_enqueued ${reconcilerState.enqueued}`,
+    "# HELP ai_admin_repository_reconciler_errors Errors in the last run.",
+    "# TYPE ai_admin_repository_reconciler_errors gauge",
+    `ai_admin_repository_reconciler_errors ${reconcilerState.errors}`
   ];
   for (const [route, value] of httpMetrics.byRoute) lines.push(`ai_admin_http_route_requests_total{route="${route.replaceAll('"', '\\"')}"} ${value}`);
   return `${lines.join("\n")}\n`;
@@ -4219,6 +4300,16 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/api/reconciler") {
+    sendJson(res, 200, { reconciler: repositoryReconcilerStatus() });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/reconciler/run") {
+    sendJson(res, 202, { result: await reconcileRepositories(), reconciler: repositoryReconcilerStatus() });
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/api/git/repositories") {
     sendJson(res, 200, await listRemoteRepositories(url));
     return;
@@ -4375,6 +4466,10 @@ ensureApplicationSchema()
   .then(() => {
     void runIndexScheduler();
     setInterval(() => void runIndexScheduler(), 2000).unref();
+    if (repositoryReconcilerEnabled) {
+      setTimeout(() => void reconcileRepositories(), repositoryReconcilerInitialDelayMs).unref();
+      setInterval(() => void reconcileRepositories(), repositoryReconcilerIntervalMs).unref();
+    }
     server.listen(port, "0.0.0.0", () => {
       console.log(`admin listening on ${port}`);
     });

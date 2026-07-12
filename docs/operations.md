@@ -78,6 +78,18 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 
 Valide a detecção no log antes de aumentar a concorrência de indexação. O arquivo `docker-compose.gpu.yml` só reserva GPU para o Ollama e não altera os demais serviços.
 
+## Reconciliador Git
+
+Por padrao, o Admin consulta a cada 60 minutos o HEAD remoto da branch selecionada
+em cada repositorio e agenda reindexacao incremental ao encontrar um commit novo.
+A primeira verificacao ocorre 60 segundos depois de iniciar o container. O fluxo
+faz apenas conexoes de saida e continua usando `GITHUB_TOKEN`.
+
+```bash
+curl -H "x-admin-api-key: $ADMIN_API_KEY" http://localhost:$ADMIN_PORT/api/reconciler
+curl -X POST -H "x-admin-api-key: $ADMIN_API_KEY" http://localhost:$ADMIN_PORT/api/reconciler/run
+```
+
 ## Backup
 
 ```bash
