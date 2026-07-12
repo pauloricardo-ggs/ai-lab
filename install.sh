@@ -132,11 +132,42 @@ mask_value() {
 should_prompt_env_var() {
   local var_name="$1"
 
+  [[ "$var_name" == *_IMAGE ]] && return 1
+  [[ "$var_name" == "RAG_EMBEDDING_QUERY_PREFIX" ]] && return 1
+  [[ "$var_name" == *_PORT ]] && return 1
+
   if [ "$INSTALL_TARGET" = "mac" ]; then
     [[ "$var_name" == "OLLAMA_IMAGE" || "$var_name" == "OLLAMA_PORT" || "$var_name" == "OLLAMA_BASE_URL" ]] && return 1
   fi
 
   return 0
+}
+
+is_supported_env_var() {
+  case "$1" in
+    POSTGRES_IMAGE|QDRANT_IMAGE|NEO4J_IMAGE|OPEN_WEBUI_IMAGE|DOCLING_IMAGE|OLLAMA_IMAGE|NODE_IMAGE|DOTNET_SDK_IMAGE|DOTNET_ASPNET_IMAGE|POSTGRES_PORT|QDRANT_HTTP_PORT|QDRANT_GRPC_PORT|NEO4J_HTTP_PORT|NEO4J_BOLT_PORT|OPEN_WEBUI_PORT|DOCLING_PORT|MCP_GATEWAY_PORT|ADMIN_PORT|OLLAMA_PORT|POSTGRES_PASSWORD|QDRANT_API_KEY|NEO4J_PASSWORD|OPEN_WEBUI_SECRET_KEY|GATEWAY_API_KEY|ADMIN_API_KEY|LOCAL_CHAT_MODEL|EMBEDDING_MODEL|EMBEDDING_VECTOR_SIZE|RAG_EMBEDDING_QUERY_PREFIX|GITHUB_TOKEN|GITHUB_OWNER)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+remove_legacy_env_vars() {
+  local tmp_file=""
+  tmp_file="$(mktemp)"
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [[ "$line" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+      is_supported_env_var "${line%%=*}" && echo "$line" >> "$tmp_file"
+    else
+      echo "$line" >> "$tmp_file"
+    fi
+  done < .env
+
+  cat "$tmp_file" > .env
+  rm "$tmp_file"
 }
 
 prompt_existing_env_values() {
@@ -304,94 +335,73 @@ if [ ! -f ".env" ]; then
   echo "Gerando .env..."
   echo ""
 
-  ask_default "POSTGRES_IMAGE" "Imagem PostgreSQL" "postgres:17.5-alpine"
-  ask_default "QDRANT_IMAGE" "Imagem Qdrant" "qdrant/qdrant:v1.17.1"
-  ask_default "NEO4J_IMAGE" "Imagem Neo4j" "neo4j:5.26.8"
-  ask_default "OPEN_WEBUI_IMAGE" "Imagem Open WebUI" "ghcr.io/open-webui/open-webui:v0.10.2"
-  ask_default "DOCLING_IMAGE" "Imagem Docling Serve" "quay.io/docling-project/docling-serve:v1.18.0"
-  if [ "$INSTALL_TARGET" = "linux" ]; then
-    ask_default "OLLAMA_IMAGE" "Imagem Ollama" "ollama/ollama:0.22.1"
-  fi
-  ask_default "NODE_IMAGE" "Imagem Node" "node:22.17.0-alpine"
-  ask_default "DOTNET_SDK_IMAGE" "Imagem .NET SDK" "mcr.microsoft.com/dotnet/sdk:8.0"
-  ask_default "DOTNET_ASPNET_IMAGE" "Imagem .NET ASP.NET" "mcr.microsoft.com/dotnet/aspnet:8.0"
-  ask_default "POSTGRES_PORT" "Porta PostgreSQL" "5432"
-  ask_default "QDRANT_HTTP_PORT" "Porta HTTP Qdrant" "6333"
-  ask_default "QDRANT_GRPC_PORT" "Porta gRPC Qdrant" "6334"
-  ask_default "NEO4J_HTTP_PORT" "Porta HTTP Neo4j" "7474"
-  ask_default "NEO4J_BOLT_PORT" "Porta Bolt Neo4j" "7687"
-  ask_default "OPEN_WEBUI_PORT" "Porta Open WebUI" "3000"
-  ask_default "DOCLING_PORT" "Porta Docling (diagnostico/UI)" "5001"
-  ask_default "MCP_GATEWAY_PORT" "Porta MCP Gateway" "7000"
-  ask_default "ADMIN_PORT" "Porta Admin UI" "8080"
-  if [ "$INSTALL_TARGET" = "mac" ]; then
-    echo "OLLAMA_BASE_URL=http://host.docker.internal:11434" >> .env
-  else
-    ask_default "OLLAMA_PORT" "Porta Ollama" "11434"
-    ask_default "OLLAMA_BASE_URL" "URL interna do Ollama para os containers" "http://ollama:11434"
-  fi
-  ask_default "POSTGRES_DB" "Nome do banco PostgreSQL" "ai_platform"
-  ask_default "POSTGRES_USER" "Usuario PostgreSQL" "ai_platform"
+  echo "POSTGRES_IMAGE=postgres:17.5-alpine" >> .env
+  echo "QDRANT_IMAGE=qdrant/qdrant:v1.17.1" >> .env
+  echo "NEO4J_IMAGE=neo4j:5.26.8" >> .env
+  echo "OPEN_WEBUI_IMAGE=ghcr.io/open-webui/open-webui:v0.10.2" >> .env
+  echo "DOCLING_IMAGE=quay.io/docling-project/docling-serve:v1.18.0" >> .env
+  echo "OLLAMA_IMAGE=ollama/ollama:0.22.1" >> .env
+  echo "NODE_IMAGE=node:22.17.0-alpine" >> .env
+  echo "DOTNET_SDK_IMAGE=mcr.microsoft.com/dotnet/sdk:8.0" >> .env
+  echo "DOTNET_ASPNET_IMAGE=mcr.microsoft.com/dotnet/aspnet:8.0" >> .env
+  echo "POSTGRES_PORT=5432" >> .env
+  echo "QDRANT_HTTP_PORT=6333" >> .env
+  echo "QDRANT_GRPC_PORT=6334" >> .env
+  echo "NEO4J_HTTP_PORT=7474" >> .env
+  echo "NEO4J_BOLT_PORT=7687" >> .env
+  echo "OPEN_WEBUI_PORT=3000" >> .env
+  echo "DOCLING_PORT=5001" >> .env
+  echo "MCP_GATEWAY_PORT=7000" >> .env
+  echo "ADMIN_PORT=8080" >> .env
+  echo "OLLAMA_PORT=11434" >> .env
   echo "POSTGRES_PASSWORD=$(generate_secret)" >> .env
   echo "QDRANT_API_KEY=$(generate_secret)" >> .env
   echo "NEO4J_PASSWORD=$(generate_secret)" >> .env
   echo "OPEN_WEBUI_SECRET_KEY=$(generate_secret)" >> .env
   echo "GATEWAY_API_KEY=$(generate_secret)" >> .env
   echo "ADMIN_API_KEY=$(generate_secret)" >> .env
-  ask_default "LLM_PROVIDER" "Provider LLM local" "ollama"
   ask_default "LOCAL_CHAT_MODEL" "Modelo local de chat" "qwen2.5:7b-instruct"
-  ask_default "EMBEDDING_MODEL" "Modelo local de embedding" "nomic-embed-text"
-  ask_default "EMBEDDING_VECTOR_SIZE" "Tamanho do vetor embedding" "768"
+  ask_default "EMBEDDING_MODEL" "Modelo local de embedding" "qwen3-embedding:0.6b"
+  ask_default "EMBEDDING_VECTOR_SIZE" "Tamanho do vetor embedding" "1024"
+  echo 'RAG_EMBEDDING_QUERY_PREFIX="Instruct: Given a question in Portuguese or English, retrieve the passages from internal business and technical documents that best support a precise and factual answer.\nQuery: "' >> .env
   ask_default "GITHUB_TOKEN" "GitHub token opcional (privados: fine-grained Contents Read-only; classic: repo)" ""
   ask_default "GITHUB_OWNER" "GitHub owner/org padrao, opcional" ""
   chmod 600 .env
 fi
 
-ensure_env_default "ADMIN_PORT" "8080"
 ensure_env_default "ADMIN_API_KEY" "$(generate_secret)"
-ensure_env_default "POSTGRES_PASSWORD" "$(generate_secret)"
-ensure_env_default "QDRANT_API_KEY" "$(generate_secret)"
-ensure_env_default "NEO4J_PASSWORD" "$(generate_secret)"
-ensure_env_default "OPEN_WEBUI_SECRET_KEY" "$(generate_secret)"
+ensure_env_default "POSTGRES_IMAGE" "postgres:17.5-alpine"
+ensure_env_default "QDRANT_IMAGE" "qdrant/qdrant:v1.17.1"
+ensure_env_default "NEO4J_IMAGE" "neo4j:5.26.8"
+ensure_env_default "OPEN_WEBUI_IMAGE" "ghcr.io/open-webui/open-webui:v0.10.2"
 ensure_env_default "DOCLING_IMAGE" "quay.io/docling-project/docling-serve:v1.18.0"
-ensure_env_default "DOCLING_PORT" "5001"
-ensure_env_default "CONTENT_EXTRACTION_ENGINE" "docling"
-ensure_env_default "DOCLING_SERVER_URL" "http://docling:5001"
-ensure_env_default "DOCLING_PARAMS" '{"do_ocr":true,"force_ocr":false,"ocr_engine":"easyocr","ocr_lang":["pt","en"],"pdf_backend":"dlparse_v4","table_mode":"accurate","pipeline":"standard"}'
-ensure_env_default "DOCLING_MAX_SYNC_WAIT" "600"
-ensure_env_default "DOCLING_NUM_WORKERS" "1"
-ensure_env_default "DOCLING_CPU_THREADS" "4"
-ensure_env_default "RAG_EMBEDDING_ENGINE" "ollama"
-ensure_env_default "ENABLE_RAG_HYBRID_SEARCH" "true"
-ensure_env_default "ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS" "true"
-ensure_env_default "GATEWAY_API_KEY" "$(generate_secret)"
 ensure_env_default "OLLAMA_IMAGE" "ollama/ollama:0.22.1"
 ensure_env_default "NODE_IMAGE" "node:22.17.0-alpine"
 ensure_env_default "DOTNET_SDK_IMAGE" "mcr.microsoft.com/dotnet/sdk:8.0"
 ensure_env_default "DOTNET_ASPNET_IMAGE" "mcr.microsoft.com/dotnet/aspnet:8.0"
+ensure_env_default "POSTGRES_PORT" "5432"
+ensure_env_default "QDRANT_HTTP_PORT" "6333"
+ensure_env_default "QDRANT_GRPC_PORT" "6334"
+ensure_env_default "NEO4J_HTTP_PORT" "7474"
+ensure_env_default "NEO4J_BOLT_PORT" "7687"
+ensure_env_default "OPEN_WEBUI_PORT" "3000"
+ensure_env_default "DOCLING_PORT" "5001"
+ensure_env_default "MCP_GATEWAY_PORT" "7000"
+ensure_env_default "ADMIN_PORT" "8080"
 ensure_env_default "OLLAMA_PORT" "11434"
-ensure_env_default "OLLAMA_BASE_URL" "http://ollama:11434"
-if [ "$INSTALL_TARGET" = "mac" ]; then
-  set_env_value "OLLAMA_BASE_URL" "http://host.docker.internal:11434"
-fi
-ensure_env_default "LLM_PROVIDER" "ollama"
+ensure_env_default "POSTGRES_PASSWORD" "$(generate_secret)"
+ensure_env_default "QDRANT_API_KEY" "$(generate_secret)"
+ensure_env_default "NEO4J_PASSWORD" "$(generate_secret)"
+ensure_env_default "OPEN_WEBUI_SECRET_KEY" "$(generate_secret)"
+ensure_env_default "GATEWAY_API_KEY" "$(generate_secret)"
 ensure_env_default "LOCAL_CHAT_MODEL" "qwen2.5:7b-instruct"
-ensure_env_default "EMBEDDING_MODEL" "nomic-embed-text"
-ensure_env_default "EMBEDDING_VECTOR_SIZE" "768"
-ensure_env_default "EMBEDDING_MAX_CHARS" "6000"
-ensure_env_default "EMBEDDING_MAX_LINES" "80"
-ensure_env_default "EMBEDDING_TIMEOUT_MS" "120000"
-ensure_env_default "EMBEDDING_MAX_RETRIES" "2"
-ensure_env_default "ROSLYN_TIMEOUT_MS" "45000"
-ensure_env_default "NEO4J_TIMEOUT_MS" "60000"
-ensure_env_default "INDEX_FILE_TIMEOUT_MS" "300000"
-ensure_env_default "INDEX_MAX_CONCURRENT_REPOSITORIES" "1"
-ensure_env_default "INDEX_IGNORE_MIGRATIONS" "true"
-if grep -q "^LLM_PROVIDER=openai$" .env; then
-  set_env_value "LLM_PROVIDER" "ollama"
-fi
+ensure_env_default "EMBEDDING_MODEL" "qwen3-embedding:0.6b"
+ensure_env_default "EMBEDDING_VECTOR_SIZE" "1024"
+ensure_env_default "RAG_EMBEDDING_QUERY_PREFIX" '"Instruct: Given a question in Portuguese or English, retrieve the passages from internal business and technical documents that best support a precise and factual answer.\nQuery: "'
 ensure_env_default "GITHUB_TOKEN" ""
 ensure_env_default "GITHUB_OWNER" ""
+
+remove_legacy_env_vars
 
 if [ "$updating_existing_env" = true ]; then
   echo "Pressione Enter para manter cada valor atual. Valores sensiveis sao mascarados."
@@ -407,12 +417,6 @@ if [ "$updating_existing_env" = true ]; then
     echo "Secrets regenerados por solicitacao explicita."
   fi
 fi
-
-echo ""
-echo "Resumo da instalacao:"
-echo ""
-sed -E 's/((PASSWORD|KEY|SECRET)[^=]*)=.*/\1=********/g' .env
-echo ""
 
 read -r -p "Confirmar instalacao e subir containers? [s/N]: " confirm
 if [[ "$confirm" != "s" && "$confirm" != "S" ]]; then
@@ -465,25 +469,25 @@ echo "Instalacao concluida"
 echo "======================================"
 echo ""
 echo "Open WebUI:"
-echo "http://$SERVER_IP:$(grep '^OPEN_WEBUI_PORT=' .env | cut -d '=' -f2)"
+echo "http://$SERVER_IP:$(env_value OPEN_WEBUI_PORT)"
 echo ""
 echo "Admin UI:"
-echo "http://$SERVER_IP:$(grep '^ADMIN_PORT=' .env | cut -d '=' -f2)"
+echo "http://$SERVER_IP:$(env_value ADMIN_PORT)"
 echo ""
 echo "Qdrant Dashboard:"
-echo "http://$SERVER_IP:$(grep '^QDRANT_HTTP_PORT=' .env | cut -d '=' -f2)/dashboard"
+echo "http://$SERVER_IP:$(env_value QDRANT_HTTP_PORT)/dashboard"
 echo ""
 echo "Neo4j Browser:"
-echo "http://$SERVER_IP:$(grep '^NEO4J_HTTP_PORT=' .env | cut -d '=' -f2)"
+echo "http://$SERVER_IP:$(env_value NEO4J_HTTP_PORT)"
 echo ""
 echo "MCP Gateway:"
-echo "http://$SERVER_IP:$(grep '^MCP_GATEWAY_PORT=' .env | cut -d '=' -f2)"
+echo "http://$SERVER_IP:$(env_value MCP_GATEWAY_PORT)"
 echo ""
 echo "Ollama:"
 if [ "$INSTALL_TARGET" = "mac" ]; then
-  echo "$(grep '^OLLAMA_BASE_URL=' .env | tail -n 1 | cut -d '=' -f2-)"
+  echo "http://localhost:11434"
 else
-  echo "http://$SERVER_IP:$(grep '^OLLAMA_PORT=' .env | cut -d '=' -f2)"
+  echo "http://$SERVER_IP:$(env_value OLLAMA_PORT)"
 fi
 echo ""
 echo "Proximos passos manuais:"

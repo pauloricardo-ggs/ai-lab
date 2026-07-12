@@ -151,8 +151,8 @@ Padrao:
 
 ```dotenv
 LLM_PROVIDER=ollama
-EMBEDDING_MODEL=nomic-embed-text
-EMBEDDING_VECTOR_SIZE=768
+EMBEDDING_MODEL=qwen3-embedding:0.6b
+EMBEDDING_VECTOR_SIZE=1024
 ```
 
 Nao exigir chave de provedor externo para indexacao.

@@ -3,8 +3,6 @@ set -euo pipefail
 
 source .env
 
-ADMIN_PORT="${ADMIN_PORT:-8080}"
-OLLAMA_PORT="${OLLAMA_PORT:-11434}"
 INSTALL_TARGET="${INSTALL_TARGET:-linux}"
 
 docker_cmd() {
@@ -29,7 +27,7 @@ curl -fsS "http://localhost:${OPEN_WEBUI_PORT}" >/dev/null && echo "Open WebUI O
 echo ""
 
 echo "Verificando Docling..."
-curl -fsS "http://localhost:${DOCLING_PORT:-5001}/docs" >/dev/null && echo "Docling OK"
+curl -fsS "http://localhost:${DOCLING_PORT}/docs" >/dev/null && echo "Docling OK"
 echo ""
 
 echo "Verificando Admin UI..."
@@ -43,9 +41,9 @@ echo ""
 
 echo "Verificando Ollama..."
 if [ "$INSTALL_TARGET" = "mac" ]; then
-  OLLAMA_HEALTH_URL="http://localhost:11434"
-else
   OLLAMA_HEALTH_URL="http://localhost:${OLLAMA_PORT}"
+else
+  OLLAMA_HEALTH_URL="http://localhost:11434"
 fi
 curl -fsS "${OLLAMA_HEALTH_URL}/api/tags" >/dev/null && echo "Ollama OK"
 echo ""

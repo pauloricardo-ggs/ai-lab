@@ -8,7 +8,8 @@ const serviceName = process.env.SERVICE_NAME || "code-mcp";
 const qdrantUrl = process.env.QDRANT_URI || "http://qdrant:6333";
 const qdrantApiKey = process.env.QDRANT_API_KEY || "";
 const ollamaUrl = process.env.OLLAMA_BASE_URL || "http://ollama:11434";
-const embeddingModel = process.env.EMBEDDING_MODEL || "nomic-embed-text";
+const embeddingModel = process.env.EMBEDDING_MODEL || "qwen3-embedding:0.6b";
+const codeSearchInstruction = "Given a software engineering question in Portuguese or English, retrieve the source-code symbols and excerpts most relevant to answering it, prioritizing exact APIs, implementations, dependencies, and call relationships.";
 const codeCollection = "code_symbols";
 
 const pool = new Pool({
@@ -195,7 +196,7 @@ async function searchCode(tool, workspace, payload) {
 
   let matches = [];
   try {
-    const embedding = await createEmbedding(text);
+    const embedding = await createEmbedding(buildCodeSearchQuery(text));
     const points = await searchQdrant(embedding, workspace.id, payload.repository_id, limit);
     matches = await hydrateQdrantMatches(points);
   } catch (error) {
@@ -280,6 +281,10 @@ async function createEmbedding(text) {
   }
 
   return body.embedding;
+}
+
+function buildCodeSearchQuery(query) {
+  return `Instruct: ${codeSearchInstruction}\nQuery: ${query}`;
 }
 
 async function searchQdrant(vector, workspaceId, repositoryId, limit) {

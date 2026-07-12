@@ -25,4 +25,3 @@ create_collection "business_documents"
 create_collection "code_symbols"
 
 echo "Collections criadas."
-

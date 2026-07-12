@@ -126,19 +126,9 @@ Backup:
 
 ## Atualizacao
 
-Para atualizar imagens, nunca use `latest` ou `main`.
-
-Edite `.env` e troque explicitamente:
-
-```dotenv
-QDRANT_IMAGE=qdrant/qdrant:vX.Y.Z
-OPEN_WEBUI_IMAGE=ghcr.io/open-webui/open-webui:vX.Y.Z
-DOCLING_IMAGE=quay.io/docling-project/docling-serve:vX.Y.Z
-POSTGRES_IMAGE=postgres:X.Y-alpine
-NEO4J_IMAGE=neo4j:X.Y.Z
-DOTNET_SDK_IMAGE=mcr.microsoft.com/dotnet/sdk:X.Y
-DOTNET_ASPNET_IMAGE=mcr.microsoft.com/dotnet/aspnet:X.Y
-```
+As versoes das imagens ficam no `.env`, permitindo atualizar a stack sem editar
+os arquivos Compose. Altere as variaveis `*_IMAGE` explicitamente; nunca use
+`latest` ou `main`.
 
 Depois execute:
 
@@ -217,25 +207,30 @@ Se aparecer `github_owner_without_visible_repositories_for_token`, verifique se 
 
 ## Modelos Locais
 
-O servidor foi desenhado para usar modelos locais/open source. O runtime padrao e o Ollama, exposto internamente para o Open WebUI por `OLLAMA_BASE_URL=http://ollama:11434`.
+O servidor foi desenhado para usar modelos locais/open source. O runtime padrao e
+o Ollama. Sua URL interna e definida pelo Compose e nao precisa estar no `.env`.
 
 O instalador nao exige `OPENAI_API_KEY`. As variaveis relevantes sao:
 
 ```dotenv
-LLM_PROVIDER=ollama
 LOCAL_CHAT_MODEL=qwen2.5:7b-instruct
-EMBEDDING_MODEL=nomic-embed-text
-EMBEDDING_VECTOR_SIZE=768
+EMBEDDING_MODEL=qwen3-embedding:0.6b
+EMBEDDING_VECTOR_SIZE=1024
 ```
 
 Durante a instalacao, o `install.sh` baixa automaticamente os modelos configurados:
 
 ```bash
 docker exec -it ai-ollama ollama pull qwen2.5:7b-instruct
-docker exec -it ai-ollama ollama pull nomic-embed-text
+docker exec -it ai-ollama ollama pull qwen3-embedding:0.6b
 ```
 
 Para trocar modelos, edite `LOCAL_CHAT_MODEL` e `EMBEDDING_MODEL` no `.env` antes de executar o install, ou rode `docker exec -it ai-ollama ollama pull <modelo>` manualmente depois.
+
+O `.env` e reservado a versoes de imagens, portas publicas, secrets, modelos e
+credenciais opcionais do GitHub. URLs internas, nomes de banco, presets do
+Docling e limites operacionais ficam no Compose ou nos defaults do codigo. Assim,
+o instalador solicita apenas escolhas que variam de fato entre instalacoes.
 
 O Open WebUI responde aos usuarios usando os modelos locais configurados. Quando os MCPs responderem a agentes externos, eles tambem devem consultar apenas dados indexados localmente e modelos locais quando precisarem de inferencia no servidor.
 

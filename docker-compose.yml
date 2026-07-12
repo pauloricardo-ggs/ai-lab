@@ -6,8 +6,8 @@ services:
     env_file:
       - .env
     environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_DB: ai_platform
+      POSTGRES_USER: ai_platform
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
       - ./data/postgres/db:/var/lib/postgresql/data
@@ -15,7 +15,7 @@ services:
     ports:
       - "${POSTGRES_PORT}:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U ai_platform -d ai_platform"]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -73,19 +73,20 @@ services:
       - .env
     environment:
       WEBUI_SECRET_KEY: ${OPEN_WEBUI_SECRET_KEY}
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      DATABASE_URL: postgresql://ai_platform:${POSTGRES_PASSWORD}@postgres:5432/ai_platform
+      OLLAMA_BASE_URL: http://ollama:11434
       VECTOR_DB: qdrant
       QDRANT_URI: http://qdrant:6333
       QDRANT_API_KEY: ${QDRANT_API_KEY}
-      CONTENT_EXTRACTION_ENGINE: ${CONTENT_EXTRACTION_ENGINE:-docling}
-      DOCLING_SERVER_URL: ${DOCLING_SERVER_URL:-http://docling:5001}
-      DOCLING_PARAMS: ${DOCLING_PARAMS:-{"do_ocr":true,"force_ocr":false,"ocr_engine":"easyocr","ocr_lang":["pt","en"],"pdf_backend":"dlparse_v4","table_mode":"accurate","pipeline":"standard"}}
-      RAG_EMBEDDING_ENGINE: ${RAG_EMBEDDING_ENGINE:-ollama}
-      RAG_EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
-      RAG_OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
-      ENABLE_RAG_HYBRID_SEARCH: ${ENABLE_RAG_HYBRID_SEARCH:-true}
-      ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS: ${ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS:-true}
+      CONTENT_EXTRACTION_ENGINE: docling
+      DOCLING_SERVER_URL: http://docling:5001
+      DOCLING_PARAMS: '{"do_ocr":true,"force_ocr":false,"ocr_engine":"easyocr","ocr_lang":["pt","en"],"pdf_backend":"dlparse_v4","table_mode":"accurate","pipeline":"standard"}'
+      RAG_EMBEDDING_ENGINE: ollama
+      RAG_EMBEDDING_MODEL: ${EMBEDDING_MODEL:-qwen3-embedding:0.6b}
+      RAG_EMBEDDING_QUERY_PREFIX: ${RAG_EMBEDDING_QUERY_PREFIX}
+      RAG_OLLAMA_BASE_URL: http://ollama:11434
+      ENABLE_RAG_HYBRID_SEARCH: "true"
+      ENABLE_RAG_HYBRID_SEARCH_ENRICHED_TEXTS: "true"
     volumes:
       - ./data/open-webui:/app/backend/data
     ports:
@@ -103,20 +104,20 @@ services:
       - ai-platform
 
   docling:
-    image: ${DOCLING_IMAGE:-quay.io/docling-project/docling-serve:v1.18.0}
+    image: ${DOCLING_IMAGE}
     container_name: ai-docling
     restart: unless-stopped
     environment:
       DOCLING_SERVE_ENABLE_UI: "true"
-      DOCLING_SERVE_MAX_SYNC_WAIT: ${DOCLING_MAX_SYNC_WAIT:-600}
-      DOCLING_SERVE_ENG_LOC_NUM_WORKERS: ${DOCLING_NUM_WORKERS:-1}
+      DOCLING_SERVE_MAX_SYNC_WAIT: "600"
+      DOCLING_SERVE_ENG_LOC_NUM_WORKERS: "1"
       UVICORN_WORKERS: "1"
-      OMP_NUM_THREADS: ${DOCLING_CPU_THREADS:-4}
-      MKL_NUM_THREADS: ${DOCLING_CPU_THREADS:-4}
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
     volumes:
       - ./data/docling:/app/data
     ports:
-      - "${DOCLING_PORT:-5001}:5001"
+      - "${DOCLING_PORT}:5001"
     networks:
       - ai-platform
 
@@ -133,7 +134,13 @@ services:
       PORT: 7600
       POSTGRES_HOST: postgres
       POSTGRES_INTERNAL_PORT: 5432
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_BASE_URL: http://ollama:11434
+      ADMIN_PORT: ${ADMIN_PORT}
+      OPEN_WEBUI_PORT: ${OPEN_WEBUI_PORT}
+      QDRANT_HTTP_PORT: ${QDRANT_HTTP_PORT}
+      OLLAMA_PORT: ${OLLAMA_PORT}
+      NEO4J_HTTP_PORT: ${NEO4J_HTTP_PORT}
+      MCP_GATEWAY_PORT: ${MCP_GATEWAY_PORT}
       REPOS_ROOT: /repos
       ROSLYN_INDEXER_URL: http://roslyn-indexer:7201
     volumes:
@@ -163,8 +170,8 @@ services:
     build:
       context: ./workers/roslyn-indexer
       args:
-        DOTNET_SDK_IMAGE: ${DOTNET_SDK_IMAGE:-mcr.microsoft.com/dotnet/sdk:8.0}
-        DOTNET_ASPNET_IMAGE: ${DOTNET_ASPNET_IMAGE:-mcr.microsoft.com/dotnet/aspnet:8.0}
+        DOTNET_SDK_IMAGE: ${DOTNET_SDK_IMAGE}
+        DOTNET_ASPNET_IMAGE: ${DOTNET_ASPNET_IMAGE}
     container_name: ai-roslyn-indexer
     restart: unless-stopped
     environment:
@@ -227,7 +234,7 @@ services:
     environment:
       PORT: 7102
       SERVICE_NAME: code-mcp
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_BASE_URL: http://ollama:11434
     depends_on:
       postgres:
         condition: service_healthy

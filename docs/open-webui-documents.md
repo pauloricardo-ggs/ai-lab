@@ -110,7 +110,7 @@ WebUI; um novo extrator nao altera chunks ja armazenados.
 ## Embeddings e busca
 
 O Open WebUI usa o Ollama com `EMBEDDING_MODEL` (por padrao,
-`nomic-embed-text`). Nao troque o modelo em uma base ja indexada sem reprocessar
+`qwen3-embedding:0.6b`). Nao troque o modelo em uma base ja indexada sem reprocessar
 seus arquivos: vetores gerados por modelos ou dimensoes diferentes nao sao
 comparaveis.
 
@@ -156,4 +156,3 @@ por exemplo `SEGREDO-ALFA-9271`, e para `KB-B` outro com
 `SEGREDO-BETA-4832`. Ao consultar exclusivamente `KB-A`, o segundo marcador nao
 pode ser recuperado; o inverso tambem deve valer. Execute esse teste com usuarios
 e permissoes diferentes antes de disponibilizar a stack fora de homologacao.
-
