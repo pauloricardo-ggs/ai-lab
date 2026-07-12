@@ -123,11 +123,13 @@ const embeddingMaxChars = Math.max(500, Number(process.env.EMBEDDING_MAX_CHARS |
 const embeddingMaxLines = Math.max(1, Number(process.env.EMBEDDING_MAX_LINES || 80));
 const embeddingContentMaxChars = Math.max(100, embeddingMaxChars - 800);
 const embeddingContentMaxLines = Math.max(1, embeddingMaxLines - 8);
-const embeddingTimeoutMs = Math.max(1_000, Number(process.env.EMBEDDING_TIMEOUT_MS || 120000));
+const embeddingTimeoutMs = Math.max(1_000, Number(process.env.EMBEDDING_TIMEOUT_MS || 300000));
 const embeddingMaxRetries = Math.max(0, Number(process.env.EMBEDDING_MAX_RETRIES || 2));
-const roslynTimeoutMs = Math.max(1_000, Number(process.env.ROSLYN_TIMEOUT_MS || 45000));
-const neo4jTimeoutMs = Math.max(1_000, Number(process.env.NEO4J_TIMEOUT_MS || 60000));
-const indexFileTimeoutMs = Math.max(1_000, Number(process.env.INDEX_FILE_TIMEOUT_MS || 300000));
+const roslynTimeoutMs = Math.max(1_000, Number(process.env.ROSLYN_TIMEOUT_MS || 120000));
+const neo4jTimeoutMs = Math.max(1_000, Number(process.env.NEO4J_TIMEOUT_MS || 120000));
+// Um arquivo pode gerar muitos chunks e embeddings em hardware local. O limite
+// precisa abranger o pipeline inteiro, e nao somente uma chamada individual.
+const indexFileTimeoutMs = Math.max(1_000, Number(process.env.INDEX_FILE_TIMEOUT_MS || 1200000));
 const indexIgnoreMigrations = String(process.env.INDEX_IGNORE_MIGRATIONS || "true").toLowerCase() !== "false";
 const configuredIndexConcurrency = Math.min(3, Math.max(1, Number(process.env.INDEX_MAX_CONCURRENT_REPOSITORIES || 1)));
 const activeIndexJobs = new Map();

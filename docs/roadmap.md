@@ -1,6 +1,6 @@
 # Roadmap da Plataforma
 
-Atualizado em: 2026-07-10
+Atualizado em: 2026-07-12
 
 Este documento descreve o que ja foi implementado, o que ainda precisa ser implementado e a ordem recomendada para continuacao do desenvolvimento. Ele deve ser usado como handoff para agentes e desenvolvedores que forem assumir novas melhorias.
 
@@ -30,6 +30,16 @@ Construir uma plataforma interna de IA, local-first, para:
 - Imagens Docker devem usar versoes fixas, nunca `latest` ou `main`.
 
 ## Estado Atual Implementado
+
+### Atualizacoes recentes (2026-07-12)
+
+- Instalador interativo revisado com etapas visuais, preflight, resumo de configuracao e mensagens de erro mais claras.
+- Timeouts da indexacao ajustados para modelos locais e repositorios maiores:
+  - arquivo completo: 20 minutos;
+  - embedding: 5 minutos;
+  - Roslyn e Neo4j: 2 minutos.
+- O seletor de concorrencia da fila permanece aberto durante o polling de estatisticas da Admin UI.
+- A resolucao de relacoes continua sendo executada no escopo de todo o workspace ao final de cada job. Assim, repositorios indexados em paralelo tambem podem ser relacionados quando ambos concluem.
 
 ### Infraestrutura
 
@@ -212,6 +222,12 @@ Implementado:
   - simbolo no mesmo repositorio
   - simbolo em outro repositorio do mesmo workspace
   - dependencia para repositorio do workspace por nome/URL
+- Protobuf extrai imports, packages, messages, services, RPCs, tipos de request/response e referencias de campos. Tipos e RPCs podem ser resolvidos contra simbolos de outros repositorios do workspace.
+
+Limitacao atual de Protobuf:
+
+- Um `import "caminho/contrato.proto"` e resolvido por caminho apenas dentro do mesmo repositorio. Imports por include path entre repositorios ainda nao sao ligados diretamente.
+- A plataforma reconhece o contrato gRPC e seus tipos, mas ainda nao comprova uma chamada de rede entre dois servicos a partir de clientes gerados ou configuracoes de endpoint.
 
 ### Roslyn Indexer
 
@@ -381,6 +397,7 @@ Pendente/decisao futura:
 12. Descricao semantica de graficos/figuras ainda nao foi habilitada; OCR textual ja e executado pelo Docling no fluxo do Open WebUI.
 13. Open WebUI e workspaces locais nao sao sincronizados por decisao de arquitetura e representam dominios distintos.
 14. Worker `tree-sitter-indexer` ainda e conceitual/documentado, nao integrado.
+15. Imports Protobuf cross-repo por include path e inferencia de consumidor/provedor gRPC ainda nao sao resolvidos de forma semantica.
 
 ## Roadmap Recomendado
 
@@ -394,6 +411,8 @@ Itens:
 - Testar C#, TypeScript, JavaScript, HTML, CSS, Swift, Dart, JSON, YAML, SQL e Protobuf.
 - Testar manifestos de dependencia.
 - Testar resolucao cross-repo.
+- Testar Protobuf com contratos divididos entre repositorios, incluindo imports, RPCs e tipos de request/response.
+- Testar concorrencia da fila, retomada apos reinicio e atualizacao do painel durante a escolha de concorrencia.
 - Testar cancelamento e reindexacao incremental.
 - Adicionar fixtures com arquivos removidos/alterados/inalterados.
 - Criar comando de validacao local documentado.
@@ -403,6 +422,7 @@ Criterios de aceite:
 - Um agente consegue rodar os testes sem subir toda a stack, quando possivel.
 - Falhas em extratores por linguagem sao detectadas por fixture.
 - Regressao em schema ou resolucao de relacoes quebra teste.
+- Um import Protobuf cross-repo nao e marcado como resolvido por engano enquanto o suporte a include paths nao existir.
 
 Arquivos provaveis:
 
@@ -412,12 +432,15 @@ Arquivos provaveis:
 - `workers/roslyn-indexer/RoslynIndexer.csproj`
 - `scripts/init-db.sql`
 
-### Fase 2 - Code MCP Arquitetural
+### Fase 2 - Relacoes Cross-Repo e Code MCP Arquitetural
 
 Objetivo: tornar o MCP util para perguntas de arquitetura e impacto.
 
 Itens:
 
+- Implementar resolucao de imports Protobuf cross-repo por include paths configuraveis.
+- Relacionar clientes gRPC, servicos e RPCs quando houver evidencia estatica suficiente no codigo.
+- Exibir a confianca/origem da inferencia para evitar tratar convencoes como certeza.
 - Implementar `code.explain_architecture` com dados reais.
 - Retornar repositorios do workspace, linguagens, arquivos centrais, simbolos centrais e dependencias.
 - Criar consulta de impacto por simbolo/arquivo.
@@ -427,6 +450,7 @@ Itens:
 
 Criterios de aceite:
 
+- Um contrato `.proto` mantido em um repositorio pode ser ligado ao consumidor/provedor em outro repositorio quando o include path estiver configurado.
 - Uma chamada MCP consegue explicar a arquitetura basica de um workspace indexado.
 - Uma chamada MCP consegue responder impacto de alterar um simbolo.
 - Resultados incluem fontes: repositorio, arquivo e linha.
@@ -703,11 +727,12 @@ Arquivos provaveis:
 - Avaliar Tree-sitter para linguagens nao C#.
 - Melhorar resolucao de imports com aliases (`tsconfig.paths`, Dart packages, Swift modules).
 - Melhorar resolucao de imports Protobuf com include paths e dependencias externas conhecidas.
+- Identificar consumidores e provedores gRPC a partir de protos, clientes gerados e configuracoes, com nivel de confianca explicito.
 - Melhorar resolucao SQL por schema.
 - Diferenciar chamadas locais, chamadas externas e chamadas de framework.
 - Calcular metricas de centralidade no grafo.
 - Persistir commit SHA indexado.
-- Adicionar fila persistente para jobs, em vez de apenas jobs em memoria.
+- Manter cobertura de recuperacao de jobs persistidos apos reinicio; o scheduler ativo permanece em memoria, mas os jobs e a fila ja sao persistidos.
 - Adicionar retry por arquivo e por fase.
 
 ### Documentos
@@ -761,22 +786,21 @@ Arquivos provaveis:
 
 Ordem recomendada para proximos agentes:
 
-1. Testes automatizados da indexacao.
-2. `code.explain_architecture` real.
-3. Update/pull incremental de repositorios.
-4. Git MCP real.
-5. Validar Docling/OCR e isolamento com corpus documental real.
-6. Melhorar citacoes e chunking documental nas configuracoes do Open WebUI.
-7. Avaliar descricao local de graficos e diagramas.
-8. Explorador visual do grafo.
-9. RBAC/SSO.
-10. Observabilidade e hardening de deploy.
+1. Testes automatizados da indexacao, especialmente incremental, cancelamento, concorrencia e relacoes cross-repo/Protobuf.
+2. Update/pull incremental de repositorios e registro do commit indexado.
+3. Git MCP real, reutilizando os repositorios ja sincronizados e o commit indexado.
+4. Relacoes gRPC cross-repo: include paths Protobuf, consumidores/provedores e nivel de confianca.
+5. `code.explain_architecture` real, apoiado pelo grafo e pelas relacoes mais confiaveis.
+6. Validar Docling/OCR e isolamento com corpus documental real; melhorar citacoes e chunking no Open WebUI.
+7. Explorador visual do grafo.
+8. RBAC/SSO.
+9. Observabilidade, backup/restore testado e hardening de deploy.
 
 Justificativa:
 
-- A indexacao virou o nucleo tecnico da plataforma; sem testes, cada nova melhoria pode quebrar extratores e resolucao.
-- `code.explain_architecture` desbloqueia valor imediato para agentes tecnicos.
-- Update Git incremental e Git MCP tornam o indice sustentavel em uso diario.
+- A indexacao virou o nucleo tecnico da plataforma; sem testes, cada nova melhoria pode quebrar extratores, fila e resolucao cross-repo.
+- Update Git incremental e Git MCP tornam o indice sustentavel em uso diario e fornecem contexto temporal para perguntas arquiteturais.
+- Relacoes gRPC cross-repo devem ser melhoradas antes de uma explicacao arquitetural depender delas como fatos.
 - Open WebUI e Docling fecham o ciclo de documentos sem acoplar o dominio tecnico.
 - Validacao de OCR, grafo visual e seguranca ampliam qualidade e operacao.
 

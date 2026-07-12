@@ -564,7 +564,12 @@ function renderIndexJobs(error) {
 
   if (els.queueControls) {
     const queue = state.indexJobs.queue || {};
-    els.queueControls.innerHTML = `<span class="muted-text">Fila ${queue.paused ? "pausada" : "ativa"} · concorrencia</span><select data-queue-concurrency><option value="1" ${Number(queue.max_concurrent_repositories) === 1 ? "selected" : ""}>1</option><option value="2" ${Number(queue.max_concurrent_repositories) === 2 ? "selected" : ""}>2</option><option value="3" ${Number(queue.max_concurrent_repositories) === 3 ? "selected" : ""}>3</option></select><button class="secondary-button small-button" data-toggle-queue>${queue.paused ? "Retomar fila" : "Pausar fila"}</button>`;
+    const concurrencySelect = els.queueControls.querySelector("[data-queue-concurrency]");
+    // O polling atualiza as estatisticas a cada dois segundos. Recriar o select
+    // enquanto ele esta aberto cancela a escolha do usuario.
+    if (document.activeElement !== concurrencySelect) {
+      els.queueControls.innerHTML = `<span class="muted-text">Fila ${queue.paused ? "pausada" : "ativa"} · concorrencia</span><select data-queue-concurrency><option value="1" ${Number(queue.max_concurrent_repositories) === 1 ? "selected" : ""}>1</option><option value="2" ${Number(queue.max_concurrent_repositories) === 2 ? "selected" : ""}>2</option><option value="3" ${Number(queue.max_concurrent_repositories) === 3 ? "selected" : ""}>3</option></select><button class="secondary-button small-button" data-toggle-queue>${queue.paused ? "Retomar fila" : "Pausar fila"}</button>`;
+    }
   }
 
   const runningJobs = sortActiveIndexJobs(state.indexJobs.running || []);

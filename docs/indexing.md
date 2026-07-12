@@ -55,6 +55,8 @@ Cada execucao grava um job em `code_index_jobs` com `scope = workspace`, fase at
 
 Os jobs sao persistidos primeiro como `queued`; o scheduler inicia no maximo `INDEX_MAX_CONCURRENT_REPOSITORIES` repositorios (entre 1 e 3) e nunca executa dois jobs do mesmo repositorio. A fila pode ser pausada globalmente e jobs aguardando podem ser pausados, retomados, cancelados, enviados ao topo, movidos para cima/baixo e ter sua prioridade alterada pela Admin UI. Isso tambem permite retomar jobs aguardando depois de reiniciar o container.
 
+Para modelos locais e arquivos grandes, o tempo limite padrao por arquivo e de 20 minutos (`INDEX_FILE_TIMEOUT_MS=1200000`). Os limites de embedding, analise Roslyn e Neo4j tambem podem ser ajustados no `.env` com `EMBEDDING_TIMEOUT_MS`, `ROSLYN_TIMEOUT_MS` e `NEO4J_TIMEOUT_MS`.
+
 Migrations C# historicas dentro de `Migrations/` sao registradas como `migration_file` e ignoradas por padrao. Arquivos `*Snapshot.cs` continuam indexaveis.
 
 Antes de chamar o Ollama, chunks que ultrapassam `EMBEDDING_MAX_CHARS` ou `EMBEDDING_MAX_LINES` sao subdivididos e recebem `split_reason=embedding_context_limit`, `parent_chunk_index` e `subchunk_index`. Como último recurso, um erro de contexto aplica truncamento marcado por `truncated=true` e `truncate_reason=embedding_context_limit`. Timeouts e retries são configurados no `.env`; falhas isoladas de chunk ficam no metadata do arquivo e não interrompem seus demais chunks ou o repositório.

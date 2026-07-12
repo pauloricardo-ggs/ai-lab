@@ -4,12 +4,47 @@ set -euo pipefail
 PROJECT_NAME="AI Knowledge Platform"
 INSTALL_TARGET="linux"
 COMPOSE_FILE_ARGS=()
+CURRENT_STEP=0
+TOTAL_STEPS=5
 
-echo ""
-echo "======================================"
-echo "$PROJECT_NAME - Installer"
-echo "======================================"
-echo ""
+# Cores somente quando a saida estiver ligada a um terminal. Isso mantem logs
+# legiveis em CI, redirecionamentos e ferramentas de automacao.
+if [ -t 1 ] && [ "${NO_COLOR:-}" != "1" ]; then
+  RESET=$'\033[0m'
+  BOLD=$'\033[1m'
+  DIM=$'\033[2m'
+  BLUE=$'\033[38;5;39m'
+  GREEN=$'\033[38;5;42m'
+  YELLOW=$'\033[38;5;220m'
+  RED=$'\033[38;5;203m'
+else
+  RESET=""; BOLD=""; DIM=""; BLUE=""; GREEN=""; YELLOW=""; RED=""
+fi
+
+line() { printf '%*s\n' 64 '' | tr ' ' '─'; }
+title() { printf '\n%s%s%s\n%s%s%s\n' "$BOLD$BLUE" "$1" "$RESET" "$DIM" "$(line)" "$RESET"; }
+step() {
+  CURRENT_STEP=$((CURRENT_STEP + 1))
+  printf '\n%s[%d/%d]%s %s%s%s\n' "$BLUE$BOLD" "$CURRENT_STEP" "$TOTAL_STEPS" "$RESET" "$BOLD" "$1" "$RESET"
+}
+info() { printf '%s›%s %s\n' "$BLUE" "$RESET" "$1"; }
+success() { printf '%s✓%s %s\n' "$GREEN" "$RESET" "$1"; }
+warning() { printf '%s!%s %s\n' "$YELLOW" "$RESET" "$1"; }
+fail() { printf '%sErro:%s %s\n' "$RED$BOLD" "$RESET" "$1" >&2; }
+ask() { local prompt="$1"; read -r -p "${BLUE}?${RESET} ${prompt}" "${@:2}"; }
+
+on_error() {
+  local exit_code=$?
+  printf '\n'
+  fail "A instalacao foi interrompida. Revise a mensagem acima e execute novamente quando estiver pronto."
+  exit "$exit_code"
+}
+trap on_error ERR
+
+clear 2>/dev/null || true
+printf '%s  AI Knowledge Platform%s\n' "$BOLD$BLUE" "$RESET"
+printf '%s  Local AI · Knowledge · Developer tools%s\n' "$BLUE" "$RESET"
+printf '%sInstalador interativo%s  ·  infraestrutura local pronta para uso\n\n' "$DIM" "$RESET"
 
 require_command() {
   command -v "$1" >/dev/null 2>&1
@@ -18,13 +53,14 @@ require_command() {
 select_install_target() {
   local choice=""
 
-  echo "Sistema de instalacao:"
-  echo "1) Linux/servidor com Ollama em container (padrao)"
-  echo "2) macOS Apple Silicon com Ollama nativo no host"
-  echo ""
+  title "Escolha o ambiente"
+  printf '  %s1%s  Linux ou servidor %s(recomendado)%s\n' "$BOLD" "$RESET" "$DIM" "$RESET"
+  printf '     Ollama sera executado em um container Docker.\n\n'
+  printf '  %s2%s  macOS com Apple Silicon\n' "$BOLD" "$RESET"
+  printf '     Usa o Ollama instalado e em execucao no computador.\n\n'
 
   while true; do
-    read -r -p "Escolha [1]: " choice
+    ask "Ambiente [1]: " choice
     choice="${choice:-1}"
 
     case "$choice" in
@@ -39,7 +75,7 @@ select_install_target() {
         return
         ;;
       *)
-        echo "Opcao invalida. Use 1 para Linux ou 2 para macOS."
+        warning "Opcao invalida. Escolha 1 para Linux ou 2 para macOS."
         ;;
     esac
   done
@@ -51,7 +87,7 @@ ask_required() {
   local value=""
 
   while [ -z "$value" ]; do
-    read -r -p "$prompt: " value
+    ask "$prompt: " value
   done
 
   echo "$var_name=$value" >> .env
@@ -63,7 +99,7 @@ ask_default() {
   local default_value="$3"
   local value=""
 
-  read -r -p "$prompt [$default_value]: " value
+  ask "$prompt [$default_value]: " value
   value="${value:-$default_value}"
   echo "$var_name=$value" >> .env
 }
@@ -133,6 +169,8 @@ should_prompt_env_var() {
   local var_name="$1"
 
   [[ "$var_name" == *_IMAGE ]] && return 1
+  [[ "$var_name" == *_TIMEOUT_MS ]] && return 1
+  [[ "$var_name" == "INDEX_MAX_CONCURRENT_REPOSITORIES" ]] && return 1
   [[ "$var_name" == "RAG_EMBEDDING_QUERY_PREFIX" ]] && return 1
   [[ "$var_name" == *_PORT ]] && return 1
 
@@ -145,7 +183,7 @@ should_prompt_env_var() {
 
 is_supported_env_var() {
   case "$1" in
-    POSTGRES_IMAGE|QDRANT_IMAGE|NEO4J_IMAGE|OPEN_WEBUI_IMAGE|DOCLING_IMAGE|OLLAMA_IMAGE|NODE_IMAGE|DOTNET_SDK_IMAGE|DOTNET_ASPNET_IMAGE|POSTGRES_PORT|QDRANT_HTTP_PORT|QDRANT_GRPC_PORT|NEO4J_HTTP_PORT|NEO4J_BOLT_PORT|OPEN_WEBUI_PORT|DOCLING_PORT|MCP_GATEWAY_PORT|ADMIN_PORT|OLLAMA_PORT|POSTGRES_PASSWORD|QDRANT_API_KEY|NEO4J_PASSWORD|OPEN_WEBUI_SECRET_KEY|GATEWAY_API_KEY|ADMIN_API_KEY|LOCAL_CHAT_MODEL|EMBEDDING_MODEL|EMBEDDING_VECTOR_SIZE|RAG_EMBEDDING_QUERY_PREFIX|GITHUB_TOKEN|GITHUB_OWNER)
+    POSTGRES_IMAGE|QDRANT_IMAGE|NEO4J_IMAGE|OPEN_WEBUI_IMAGE|DOCLING_IMAGE|OLLAMA_IMAGE|NODE_IMAGE|DOTNET_SDK_IMAGE|DOTNET_ASPNET_IMAGE|POSTGRES_PORT|QDRANT_HTTP_PORT|QDRANT_GRPC_PORT|NEO4J_HTTP_PORT|NEO4J_BOLT_PORT|OPEN_WEBUI_PORT|DOCLING_PORT|MCP_GATEWAY_PORT|ADMIN_PORT|OLLAMA_PORT|POSTGRES_PASSWORD|QDRANT_API_KEY|NEO4J_PASSWORD|OPEN_WEBUI_SECRET_KEY|GATEWAY_API_KEY|ADMIN_API_KEY|LOCAL_CHAT_MODEL|EMBEDDING_MODEL|EMBEDDING_VECTOR_SIZE|RAG_EMBEDDING_QUERY_PREFIX|EMBEDDING_TIMEOUT_MS|ROSLYN_TIMEOUT_MS|NEO4J_TIMEOUT_MS|INDEX_FILE_TIMEOUT_MS|INDEX_MAX_CONCURRENT_REPOSITORIES|GITHUB_TOKEN|GITHUB_OWNER)
       return 0
       ;;
     *)
@@ -183,7 +221,7 @@ prompt_existing_env_values() {
     if is_sensitive_var "$var"; then display="$(mask_value "$current")"; fi
     # A lista de campos usa o descritor 3; a resposta deve sempre vir do terminal.
     # Sem isso, `read` consome a proxima linha do .env.example e corrompe valores.
-    read -r -p "$var [$display]: " value < /dev/tty
+    ask "$var [$display]: " value < /dev/tty
     if [ -n "$value" ]; then
       set_env_value "$var" "$value"
     fi
@@ -211,11 +249,11 @@ install_docker_if_needed() {
   fi
 
   if [ "$INSTALL_TARGET" = "mac" ]; then
-    echo "Docker nao encontrado. No macOS, instale e inicie o Docker Desktop antes de continuar."
+    fail "Docker nao encontrado. No macOS, instale e inicie o Docker Desktop antes de continuar."
     exit 1
   fi
 
-  echo "Docker nao encontrado. Instalando Docker..."
+  info "Docker nao encontrado. A instalacao oficial do Docker sera iniciada."
   sudo apt update
   sudo apt install -y ca-certificates curl gnupg
   sudo install -m 0755 -d /etc/apt/keyrings
@@ -229,8 +267,35 @@ install_docker_if_needed() {
   sudo apt update
   sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
   sudo usermod -aG docker "$USER"
-  echo ""
-  echo "Docker instalado. Esta sessao ainda pode precisar de sudo para acessar o Docker; o instalador continuara usando sudo docker quando necessario."
+  success "Docker instalado. O instalador usara sudo quando necessario nesta sessao."
+}
+
+preflight_check() {
+  local missing=()
+
+  require_command openssl || missing+=(openssl)
+  require_command curl || missing+=(curl)
+  [ -f docker-compose.yml ] || missing+=(docker-compose.yml)
+  [ -f .env.example ] || missing+=(.env.example)
+
+  if [ "${#missing[@]}" -gt 0 ]; then
+    fail "Itens obrigatorios ausentes: ${missing[*]}"
+    exit 1
+  fi
+
+  success "Arquivos e ferramentas basicas verificados"
+}
+
+show_install_summary() {
+  local current_action="Nova configuracao"
+  [ -f .env ] && current_action="Atualizacao da configuracao existente"
+
+  title "Resumo antes de continuar"
+  printf '  %-18s %s\n' "Ambiente" "$INSTALL_TARGET"
+  printf '  %-18s %s\n' "Operacao" "$current_action"
+  printf '  %-18s %s\n' "Chat" "$(env_value LOCAL_CHAT_MODEL)"
+  printf '  %-18s %s\n' "Embeddings" "$(env_value EMBEDDING_MODEL)"
+  printf '\n%s  A stack sera criada/atualizada e os servicos serao iniciados.%s\n\n' "$DIM" "$RESET"
 }
 
 docker_cmd() {
@@ -312,28 +377,28 @@ pull_ollama_models() {
   fi
 }
 
-echo "Este script ira preparar o servidor e subir a stack Docker."
-echo ""
-
+info "Este assistente prepara a infraestrutura, configura os servicos e valida a saude da stack."
+info "Voce podera revisar a configuracao antes de iniciar os containers."
 select_install_target
-echo "Alvo selecionado: $INSTALL_TARGET"
-echo ""
+success "Ambiente selecionado: $INSTALL_TARGET"
+
+step "Validando o ambiente"
+preflight_check
 
 updating_existing_env=false
 if [ -f ".env" ]; then
-  echo "Arquivo .env ja existe."
-  read -r -p "Deseja atualizar configuracoes mantendo os valores atuais? [s/N]: " update_existing
+  warning "Uma configuracao existente foi encontrada."
+  ask "Atualizar mantendo os valores atuais? [s/N]: " update_existing
   if [[ "$update_existing" == "s" || "$update_existing" == "S" ]]; then
     updating_existing_env=true
     cp .env ".env.before-update.$(date +%Y%m%d%H%M%S)"
-    echo "Backup criado antes da edicao do .env."
+    success "Backup do .env criado antes da edicao"
   fi
 fi
 
 if [ ! -f ".env" ]; then
-  echo ""
-  echo "Gerando .env..."
-  echo ""
+  step "Criando a configuracao"
+  info "Os segredos serao gerados automaticamente e gravados com permissao restrita."
 
   echo "POSTGRES_IMAGE=postgres:17.5-alpine" >> .env
   echo "QDRANT_IMAGE=qdrant/qdrant:v1.17.1" >> .env
@@ -364,9 +429,15 @@ if [ ! -f ".env" ]; then
   ask_default "EMBEDDING_MODEL" "Modelo local de embedding" "qwen3-embedding:0.6b"
   ask_default "EMBEDDING_VECTOR_SIZE" "Tamanho do vetor embedding" "1024"
   echo 'RAG_EMBEDDING_QUERY_PREFIX="Instruct: Given a question in Portuguese or English, retrieve the passages from internal business and technical documents that best support a precise and factual answer.\nQuery: "' >> .env
+  echo "EMBEDDING_TIMEOUT_MS=300000" >> .env
+  echo "ROSLYN_TIMEOUT_MS=120000" >> .env
+  echo "NEO4J_TIMEOUT_MS=120000" >> .env
+  echo "INDEX_FILE_TIMEOUT_MS=1200000" >> .env
+  echo "INDEX_MAX_CONCURRENT_REPOSITORIES=1" >> .env
   ask_default "GITHUB_TOKEN" "GitHub token opcional (privados: fine-grained Contents Read-only; classic: repo)" ""
   ask_default "GITHUB_OWNER" "GitHub owner/org padrao, opcional" ""
   chmod 600 .env
+  success "Arquivo .env criado com seguranca"
 fi
 
 ensure_env_default "ADMIN_API_KEY" "$(generate_secret)"
@@ -398,15 +469,21 @@ ensure_env_default "LOCAL_CHAT_MODEL" "qwen2.5:7b-instruct"
 ensure_env_default "EMBEDDING_MODEL" "qwen3-embedding:0.6b"
 ensure_env_default "EMBEDDING_VECTOR_SIZE" "1024"
 ensure_env_default "RAG_EMBEDDING_QUERY_PREFIX" '"Instruct: Given a question in Portuguese or English, retrieve the passages from internal business and technical documents that best support a precise and factual answer.\nQuery: "'
+ensure_env_default "EMBEDDING_TIMEOUT_MS" "300000"
+ensure_env_default "ROSLYN_TIMEOUT_MS" "120000"
+ensure_env_default "NEO4J_TIMEOUT_MS" "120000"
+ensure_env_default "INDEX_FILE_TIMEOUT_MS" "1200000"
+ensure_env_default "INDEX_MAX_CONCURRENT_REPOSITORIES" "1"
 ensure_env_default "GITHUB_TOKEN" ""
 ensure_env_default "GITHUB_OWNER" ""
 
 remove_legacy_env_vars
 
 if [ "$updating_existing_env" = true ]; then
-  echo "Pressione Enter para manter cada valor atual. Valores sensiveis sao mascarados."
+  step "Revisando configuracao existente"
+  info "Pressione Enter para manter cada valor. Valores sensiveis aparecem mascarados."
   prompt_existing_env_values
-  read -r -p "Regenerar secrets existentes (senhas e chaves)? [s/N]: " regenerate_secrets
+  ask "Regenerar senhas e chaves existentes? [s/N]: " regenerate_secrets
   if [[ "$regenerate_secrets" == "s" || "$regenerate_secrets" == "S" ]]; then
     set_env_value "POSTGRES_PASSWORD" "$(generate_secret)"
     set_env_value "QDRANT_API_KEY" "$(generate_secret)"
@@ -414,46 +491,47 @@ if [ "$updating_existing_env" = true ]; then
     set_env_value "OPEN_WEBUI_SECRET_KEY" "$(generate_secret)"
     set_env_value "GATEWAY_API_KEY" "$(generate_secret)"
     set_env_value "ADMIN_API_KEY" "$(generate_secret)"
-    echo "Secrets regenerados por solicitacao explicita."
+    success "Senhas e chaves regeneradas"
   fi
 fi
 
-read -r -p "Confirmar instalacao e subir containers? [s/N]: " confirm
+show_install_summary
+ask "Iniciar a instalacao agora? [s/N]: " confirm
 if [[ "$confirm" != "s" && "$confirm" != "S" ]]; then
-  echo "Instalacao cancelada."
+  info "A infraestrutura nao foi iniciada. Instalacao cancelada."
   exit 0
 fi
 
-echo ""
-echo "Criando diretorios..."
+step "Preparando armazenamento e Docker"
+info "Criando diretorios persistentes..."
 create_directories
+success "Diretorios prontos"
 
-echo ""
-echo "Verificando Docker..."
+info "Verificando Docker..."
 install_docker_if_needed
 
 if ! compose_cmd version >/dev/null 2>&1; then
-  echo "Docker Compose Plugin nao encontrado."
+  fail "Docker Compose Plugin nao encontrado. Instale-o e execute o instalador novamente."
   exit 1
 fi
+success "Docker Compose disponivel"
 
-echo ""
-echo "Buildando e subindo containers..."
+step "Construindo e iniciando servicos"
+info "Isso pode levar alguns minutos na primeira execucao."
 compose_cmd up -d --build
+success "Containers iniciados"
 
-echo ""
-echo "Aguardando servicos iniciarem..."
+info "Aguardando servicos iniciarem..."
 sleep 15
 
 pull_ollama_models
 
-echo ""
-echo "Criando collections no Qdrant..."
+step "Finalizando e validando"
+info "Criando collections no Qdrant..."
 chmod +x scripts/create-qdrant-collections.sh
 ./scripts/create-qdrant-collections.sh
 
-echo ""
-echo "Executando health check..."
+info "Executando verificacao de saude..."
 chmod +x scripts/check-health.sh
 if [ "$INSTALL_TARGET" = "mac" ]; then
   INSTALL_TARGET="$INSTALL_TARGET" COMPOSE_FILE="docker-compose.mac.yml" ./scripts/check-health.sh
@@ -463,40 +541,22 @@ fi
 
 SERVER_IP="$(detect_server_host)"
 
-echo ""
-echo "======================================"
-echo "Instalacao concluida"
-echo "======================================"
-echo ""
-echo "Open WebUI:"
-echo "http://$SERVER_IP:$(env_value OPEN_WEBUI_PORT)"
-echo ""
-echo "Admin UI:"
-echo "http://$SERVER_IP:$(env_value ADMIN_PORT)"
-echo ""
-echo "Qdrant Dashboard:"
-echo "http://$SERVER_IP:$(env_value QDRANT_HTTP_PORT)/dashboard"
-echo ""
-echo "Neo4j Browser:"
-echo "http://$SERVER_IP:$(env_value NEO4J_HTTP_PORT)"
-echo ""
-echo "MCP Gateway:"
-echo "http://$SERVER_IP:$(env_value MCP_GATEWAY_PORT)"
-echo ""
-echo "Ollama:"
+title "Instalacao concluida"
+success "Todos os servicos essenciais responderam ao health check"
+printf '\n%sAcessos locais%s\n\n' "$BOLD" "$RESET"
+printf '  %-18s %s\n' "Open WebUI" "http://$SERVER_IP:$(env_value OPEN_WEBUI_PORT)"
+printf '  %-18s %s\n' "Admin UI" "http://$SERVER_IP:$(env_value ADMIN_PORT)"
+printf '  %-18s %s\n' "Qdrant Dashboard" "http://$SERVER_IP:$(env_value QDRANT_HTTP_PORT)/dashboard"
+printf '  %-18s %s\n' "Neo4j Browser" "http://$SERVER_IP:$(env_value NEO4J_HTTP_PORT)"
+printf '  %-18s %s\n' "MCP Gateway" "http://$SERVER_IP:$(env_value MCP_GATEWAY_PORT)"
+printf '  %-18s ' "Ollama"
 if [ "$INSTALL_TARGET" = "mac" ]; then
   echo "http://localhost:11434"
 else
   echo "http://$SERVER_IP:$(env_value OLLAMA_PORT)"
 fi
-echo ""
-echo "Proximos passos manuais:"
-echo ""
-echo "1. Acessar o Open WebUI."
-echo "2. Criar o primeiro usuario administrador."
-echo "3. Conferir os modelos locais no Open WebUI."
-echo "4. Acessar a Admin UI."
-echo "5. Criar workspaces e adicionar repositorios."
-echo "6. Criar as knowledge bases no Open WebUI."
-echo "7. Fazer upload ou sincronizar documentos."
-echo "8. Configurar agentes MCP apontando para o gateway."
+printf '\n%sProximos passos%s\n' "$BOLD" "$RESET"
+printf '  1. Acesse o Open WebUI e crie o primeiro usuario administrador.\n'
+printf '  2. Confira os modelos locais e crie suas knowledge bases.\n'
+printf '  3. Na Admin UI, crie workspaces e adicione repositorios.\n'
+printf '  4. Configure seus agentes MCP para usar o gateway.\n\n'
