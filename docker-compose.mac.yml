@@ -29,7 +29,9 @@ services:
     environment:
       QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY}
     volumes:
-      - ./data/qdrant:/qdrant/storage
+      # Docker Desktop file sharing on macOS uses a FUSE-like filesystem.
+      # Qdrant requires local filesystem semantics for its mmap-backed storage.
+      - qdrant_storage:/qdrant/storage
     ports:
       - "${QDRANT_HTTP_PORT}:6333"
       - "${QDRANT_GRPC_PORT}:6334"
@@ -254,3 +256,6 @@ services:
 networks:
   ai-platform:
     driver: bridge
+
+volumes:
+  qdrant_storage:
