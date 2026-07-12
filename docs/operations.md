@@ -109,6 +109,15 @@ Para restaurar, pare cargas de escrita e execute `./scripts/restore.sh --yes bac
 
 O Admin expõe métricas Prometheus em `GET /metrics` (uptime, requisições, erros, duração acumulada e jobs ativos). A indexação registra tempos por estágio no histórico da interface. Colete também logs estruturados via `docker compose logs` e alerte para serviços offline, crescimento de erros HTTP e jobs presos.
 
+A tela `/logs` apresenta eventos operacionais em tempo quase real, com nivel,
+componente, mensagem clara e contexto técnico sanitizado. O navegador consulta
+apenas eventos novos a cada dois segundos. Os eventos são persistidos no
+PostgreSQL e sobrevivem a atualizações do navegador e reinicializações do Admin.
+A retenção remove automaticamente eventos com mais de 30 dias. A limpeza ocorre
+ao iniciar o Admin, uma vez por dia e também durante gravações em lote. Em memória
+o processo mantém somente uma janela limitada; o histórico é consultado no banco.
+A API administrativa equivalente é `GET /api/logs?after=<id>&limit=200`.
+
 ## Upgrade de Imagens
 
 Nunca use `latest` ou `main`.

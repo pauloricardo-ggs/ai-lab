@@ -198,7 +198,17 @@ CREATE TABLE IF NOT EXISTS mcp_audit_logs (
     created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS operational_logs (
+    id BIGSERIAL PRIMARY KEY,
+    level TEXT NOT NULL,
+    component TEXT NOT NULL,
+    message TEXT NOT NULL,
+    context JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_documents_workspace_id ON documents(workspace_id);
+CREATE INDEX IF NOT EXISTS idx_operational_logs_created_at ON operational_logs(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_document_chunks_workspace_id ON document_chunks(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_repositories_workspace_id ON repositories(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_code_symbols_workspace_id ON code_symbols(workspace_id);

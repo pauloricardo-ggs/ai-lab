@@ -8,6 +8,7 @@ const state = {
   repoSourceMode: "github",
   expandedIndexJobs: new Set(),
   indexReport: null,
+  logs: { entries: [], latestId: 0, retained: 0 },
   indexJobs: {
     running: [],
     history: [],
@@ -78,6 +79,13 @@ const els = {
   graphStats: document.querySelector("#graphStats"),
   reloadGraph: document.querySelector("#reloadGraph"),
   openWorkspaceGraph: document.querySelector("#openWorkspaceGraph"),
+  operationalLogs: document.querySelector("#operationalLogs"),
+  logsLevel: document.querySelector("#logsLevel"),
+  logsComponent: document.querySelector("#logsComponent"),
+  logsSearch: document.querySelector("#logsSearch"),
+  logsSummary: document.querySelector("#logsSummary"),
+  logsConnectionStatus: document.querySelector("#logsConnectionStatus"),
+  clearVisibleLogs: document.querySelector("#clearVisibleLogs"),
   mcpStatus: document.querySelector("#mcpStatus"),
   mcpBaseUrl: document.querySelector("#mcpBaseUrl"),
   mcpConfigExample: document.querySelector("#mcpConfigExample"),
@@ -148,17 +156,19 @@ function routeTo(route) {
     dashboard: "Visão geral",
     admin: "Workspaces",
     graph: "Explorador do grafo",
+    logs: "Logs operacionais",
     mcp: "MCP Gateway"
   };
   els.pageTitle.textContent = titles[route] || "Dashboard";
 
-  const path = route === "dashboard" ? "/" : route === "mcp" ? "/services/mcp-gateway" : route === "graph" ? "/graph" : "/admin";
+  const path = route === "dashboard" ? "/" : route === "mcp" ? "/services/mcp-gateway" : route === "graph" ? "/graph" : route === "logs" ? "/logs" : "/admin";
   if (window.location.pathname !== path) {
     history.pushState({ route }, "", path);
   }
 }
 
 function routeFromPath() {
+  if (window.location.pathname.startsWith("/logs")) return "logs";
   if (window.location.pathname.startsWith("/graph")) return "graph";
   if (window.location.pathname.startsWith("/admin")) {
     return "admin";
@@ -1002,6 +1012,51 @@ function inspectGraphNode(id) {
   els.graphInspector.innerHTML = `<span class="section-kicker">${escapeHtml(node.type)}</span><h3>${escapeHtml(node.label)}</h3>${node.kind ? `<code>${escapeHtml(node.kind)}</code>` : ""}<p>${related.length} relações visíveis</p><ul>${related.slice(0, 30).map((edge) => `<li><strong>${escapeHtml(edge.type)}</strong><span>${escapeHtml(edge.source === id ? edge.target : edge.source)}</span></li>`).join("")}</ul>`;
 }
 
+async function loadOperationalLogs() {
+  if (!els.operationalLogs) return;
+  try {
+    const data = await api(`/api/logs?after=${state.logs.latestId}&limit=300`);
+    if (data.entries?.length) {
+      state.logs.entries.push(...data.entries);
+      if (state.logs.entries.length > 600) state.logs.entries.splice(0, state.logs.entries.length - 600);
+    }
+    state.logs.latestId = Number(data.latest_id || state.logs.latestId);
+    state.logs.retained = Number(data.retained || 0);
+    els.logsConnectionStatus.textContent = "Ao vivo";
+    renderOperationalLogs();
+  } catch (error) {
+    els.logsConnectionStatus.textContent = "Sem conexão";
+    console.warn("operational logs refresh failed", error);
+  }
+}
+
+function renderOperationalLogs() {
+  const level = els.logsLevel?.value || "all";
+  const component = els.logsComponent?.value || "all";
+  const search = (els.logsSearch?.value || "").trim().toLocaleLowerCase("pt-BR");
+  const entries = state.logs.entries.filter((entry) => {
+    if (level !== "all" && entry.level !== level) return false;
+    if (component !== "all" && entry.component !== component) return false;
+    return !search || `${entry.message} ${entry.component} ${JSON.stringify(entry.context || {})}`.toLocaleLowerCase("pt-BR").includes(search);
+  });
+  els.logsSummary.textContent = `${entries.length} eventos visíveis · ${state.logs.retained} mantidos no servidor`;
+  if (!entries.length) {
+    els.operationalLogs.innerHTML = `<div class="empty-state">Nenhum evento corresponde aos filtros.</div>`;
+    return;
+  }
+  const wasNearBottom = els.operationalLogs.scrollHeight - els.operationalLogs.scrollTop - els.operationalLogs.clientHeight < 90;
+  els.operationalLogs.innerHTML = entries.slice().reverse().map((entry) => {
+    const context = Object.entries(entry.context || {}).filter(([, value]) => value !== null && value !== undefined && value !== "");
+    return `<article class="log-entry ${escapeHtml(entry.level)}">
+      <div class="log-entry-marker"></div>
+      <div class="log-entry-body"><div class="log-entry-heading"><span class="log-level">${escapeHtml(entry.level)}</span><strong>${escapeHtml(entry.message)}</strong></div>
+      ${context.length ? `<dl>${context.slice(0, 10).map(([key, value]) => `<div><dt>${escapeHtml(key.replaceAll("_", " "))}</dt><dd>${escapeHtml(typeof value === "object" ? JSON.stringify(value) : value)}</dd></div>`).join("")}</dl>` : ""}</div>
+      <div class="log-entry-meta"><span>${escapeHtml(entry.component)}</span><time datetime="${escapeHtml(entry.timestamp)}">${new Date(entry.timestamp).toLocaleTimeString("pt-BR")}</time></div>
+    </article>`;
+  }).join("");
+  if (wasNearBottom) els.operationalLogs.scrollTop = 0;
+}
+
 async function refreshAll() {
   try {
     await Promise.all([loadServices(), loadContainers(), loadWorkspaces(), loadMcp()]);
@@ -1215,6 +1270,13 @@ document.addEventListener("click", async (event) => {
 els.reloadGraph?.addEventListener("click", () => loadGraph());
 els.graphTypeFilter?.addEventListener("change", renderGraph);
 els.graphSearch?.addEventListener("input", renderGraph);
+els.logsLevel?.addEventListener("change", renderOperationalLogs);
+els.logsComponent?.addEventListener("change", renderOperationalLogs);
+els.logsSearch?.addEventListener("input", renderOperationalLogs);
+els.clearVisibleLogs?.addEventListener("click", () => {
+  state.logs.entries = [];
+  renderOperationalLogs();
+});
 els.graphWorkspace?.addEventListener("change", () => {
   state.graph = null;
   els.graphCanvas.innerHTML = `<div class="empty-state">Clique em “Carregar recorte” para consultar este workspace.</div>`;
@@ -1400,6 +1462,11 @@ window.setInterval(() => {
   renderIndexJobs();
 }, 1000);
 
+window.setInterval(() => {
+  if (routeFromPath() === "logs") void loadOperationalLogs();
+}, 2000);
+
 els.adminKey.value = localStorage.getItem("adminApiKey") || "";
 routeTo(routeFromPath());
 refreshAll();
+loadOperationalLogs();

@@ -20,6 +20,7 @@
           <a href="/" data-route="dashboard" class="active"><span class="nav-icon">⌂</span>Visão geral</a>
           <a href="/admin" data-route="admin"><span class="nav-icon">◇</span>Workspaces</a>
           <a href="/graph" data-route="graph"><span class="nav-icon">⌘</span>Grafo</a>
+          <a href="/logs" data-route="logs"><span class="nav-icon">≡</span>Logs</a>
           <p class="nav-label">Integrações</p>
           <a href="/services/mcp-gateway" data-route="mcp"><span class="nav-icon">↗</span>MCP Gateway</a>
         </nav>
@@ -144,6 +145,21 @@
           </section>
           <div id="graphStats" class="graph-stats muted-text">Selecione um workspace para começar.</div>
           <section class="graph-layout graph-layout-dedicated"><div id="graphCanvas" class="graph-canvas"><div class="empty-state">O grafo não é carregado automaticamente para preservar o desempenho.</div></div><aside id="graphInspector" class="graph-inspector"><span class="muted-text">Selecione um nó para inspecionar relações.</span></aside></section>
+        </section>
+
+        <section id="view-logs" class="view logs-view">
+          <section class="panel logs-header">
+            <div><span class="section-kicker">Acompanhamento operacional</span><h2>Logs em tempo real</h2><p>Eventos claros de indexação, sincronização, fila e funcionamento do sistema.</p></div>
+            <div class="logs-live-status"><span class="live-dot"></span><span id="logsConnectionStatus">Atualizando</span></div>
+          </section>
+          <section class="panel logs-toolbar">
+            <div><label for="logsLevel">Nível</label><select id="logsLevel"><option value="all">Todos</option><option value="success">Sucesso</option><option value="info">Informação</option><option value="warning">Aviso</option><option value="error">Erro</option></select></div>
+            <div><label for="logsComponent">Componente</label><select id="logsComponent"><option value="all">Todos</option><option value="sistema">Sistema</option><option value="fila">Fila</option><option value="indexação">Indexação</option><option value="reconciliador">Reconciliador</option><option value="repositórios">Repositórios</option><option value="http">HTTP</option></select></div>
+            <div><label for="logsSearch">Buscar</label><input id="logsSearch" type="search" placeholder="Repositório, mensagem ou job"></div>
+            <button id="clearVisibleLogs" class="secondary-button" type="button">Limpar tela</button>
+          </section>
+          <div id="logsSummary" class="logs-summary muted-text">Aguardando eventos…</div>
+          <section id="operationalLogs" class="operational-logs panel"><div class="empty-state">Nenhum evento recebido.</div></section>
         </section>
 
         <section id="view-mcp" class="view">

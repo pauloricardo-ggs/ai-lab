@@ -140,6 +140,36 @@ const activeIndexStatuses = ["queued", "running", "paused", "canceling"];
 const processStartedAt = Date.now();
 const httpMetrics = { requests: 0, errors: 0, durationsMs: 0, byRoute: new Map() };
 const reconcilerState = { running: false, lastStartedAt: null, lastFinishedAt: null, checked: 0, changed: 0, enqueued: 0, errors: 0 };
+const operationalLogs = [];
+let operationalLogSequence = 0;
+let operationalLogPersistenceReady = false;
+
+function operationalLog(level, component, message, context = {}) {
+  const safeContext = JSON.parse(sanitizeSecret(JSON.stringify(context || {})) || "{}");
+  const entry = { id: ++operationalLogSequence, timestamp: new Date().toISOString(), level, component, message, context: safeContext };
+  operationalLogs.push(entry);
+  if (operationalLogs.length > 1500) operationalLogs.splice(0, operationalLogs.length - 1500);
+  if (operationalLogPersistenceReady) {
+    void query(
+      `INSERT INTO operational_logs (level, component, message, context, created_at) VALUES ($1, $2, $3, $4::jsonb, $5)`,
+      [level, component, message, JSON.stringify(safeContext), entry.timestamp]
+    ).then(() => operationalLogSequence % 100 === 0
+      ? purgeExpiredOperationalLogs()
+      : null
+    ).catch((error) => console.error("operational log persistence failed", error instanceof Error ? error.message : error));
+  }
+  const output = `[${component}] ${message}`;
+  if (level === "error") console.error(output, safeContext);
+  else if (level === "warning") console.warn(output, safeContext);
+  else console.log(output, safeContext);
+  return entry;
+}
+
+async function purgeExpiredOperationalLogs() {
+  const result = await query("DELETE FROM operational_logs WHERE created_at < NOW() - INTERVAL '30 days'");
+  if (result.rowCount > 0) console.log(`[logs] ${result.rowCount} eventos com mais de 30 dias removidos.`);
+  return result.rowCount;
+}
 
 class IndexCanceledError extends Error {
   constructor() {
@@ -424,6 +454,18 @@ async function query(sql, params = []) {
 }
 
 async function ensureApplicationSchema() {
+  await query(`
+    CREATE TABLE IF NOT EXISTS operational_logs (
+      id BIGSERIAL PRIMARY KEY,
+      level TEXT NOT NULL,
+      component TEXT NOT NULL,
+      message TEXT NOT NULL,
+      context JSONB NOT NULL DEFAULT '{}',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+  await query("CREATE INDEX IF NOT EXISTS idx_operational_logs_created_at ON operational_logs(created_at DESC)");
+  operationalLogPersistenceReady = true;
   await query(`
     CREATE TABLE IF NOT EXISTS code_chunks (
       id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -1384,6 +1426,7 @@ async function enqueueRepositoryIndex(workspace, repository, requestedBy = "admi
      RETURNING id`,
     [repository.id, workspace.id, repository.name, requestedBy]
   );
+  operationalLog("info", "fila", `Indexação de ${repository.name} adicionada à fila.`, { workspace: workspace.slug, repository: repository.name, job_id: result.rows[0].id, requested_by: requestedBy });
   void runIndexScheduler();
   return result.rows[0].id;
 }
@@ -1392,6 +1435,7 @@ async function reconcileRepositories() {
   if (!repositoryReconcilerEnabled || reconcilerState.running) return { ...reconcilerState, skipped: true };
   reconcilerState.running = true;
   reconcilerState.lastStartedAt = new Date().toISOString();
+  operationalLog("info", "reconciliador", "Verificação periódica dos repositórios iniciada.");
   const run = { checked: 0, changed: 0, enqueued: 0, errors: 0 };
   try {
     const repositories = await query(
@@ -1421,6 +1465,7 @@ async function reconcileRepositories() {
             "repository-reconciler"
           );
           run.enqueued += 1;
+          operationalLog("info", "reconciliador", `Novo commit encontrado em ${repository.name}; reindexação agendada.`, { workspace: repository.workspace_slug, repository: repository.name, previous_commit: repository.indexed_commit_sha, remote_commit: remoteCommit, job_id: jobId });
           await query("UPDATE repositories SET status = 'index_queued', updated_at = NOW() WHERE id = $1", [repository.id]);
         }
         await query(
@@ -1433,12 +1478,13 @@ async function reconcileRepositories() {
           `UPDATE repositories SET metadata = metadata || $2::jsonb WHERE id = $1`,
           [repository.id, JSON.stringify({ reconciler: { checked_at: checkedAt, error: sanitizeSecret(error instanceof Error ? error.message : "reconciliation_failed") } })]
         ).catch(() => {});
-        console.error(`repository reconciliation failed: ${repository.name}`, error instanceof Error ? error.message : error);
+        operationalLog("error", "reconciliador", `Não foi possível verificar ${repository.name}.`, { workspace: repository.workspace_slug, repository: repository.name, error: error instanceof Error ? error.message : error });
       }
     }
     return { ...run, skipped: false };
   } finally {
     Object.assign(reconcilerState, run, { running: false, lastFinishedAt: new Date().toISOString() });
+    operationalLog(run.errors ? "warning" : "success", "reconciliador", `Verificação concluída: ${run.checked} repositórios, ${run.changed} alterados, ${run.enqueued} reindexações e ${run.errors} erros.`, run);
   }
 }
 
@@ -1510,6 +1556,7 @@ async function runIndexScheduler() {
       if (!row) continue;
       const workspace = { id: row.workspace_id, slug: row.workspace_slug, name: row.workspace_name };
       const repository = { id: row.repository_id, workspace_id: row.workspace_id, name: row.repository_name, local_path: row.local_path, url: row.url, default_branch: row.default_branch, status: row.status, metadata: row.metadata };
+      operationalLog("info", "indexação", `Indexação de ${repository.name} iniciada.`, { workspace: workspace.slug, repository: repository.name, job_id: job.id });
       startRepositoryIndex(workspace, repository, job.id);
     }
   } finally {
@@ -1530,10 +1577,12 @@ function startRepositoryIndex(workspace, repository, jobId) {
           JSON.stringify({ index: indexResult })
         ]
       );
+      operationalLog(Number(indexResult.errored_files || 0) > 0 ? "warning" : "success", "indexação", `Indexação de ${repository.name} concluída${Number(indexResult.errored_files || 0) > 0 ? " com erros parciais" : " com sucesso"}.`, { workspace: workspace.slug, repository: repository.name, job_id: jobId, ...indexResult });
     })
     .catch(async (error) => {
       console.error("repository index failed", error);
       if (error instanceof IndexCanceledError || error.message === "index_canceled") {
+        operationalLog("warning", "indexação", `Indexação de ${repository.name} cancelada.`, { workspace: workspace.slug, repository: repository.name, job_id: jobId });
         await query(
           `UPDATE repositories
            SET status = 'index_canceled', metadata = metadata || $2::jsonb, updated_at = NOW()
@@ -1549,6 +1598,7 @@ function startRepositoryIndex(workspace, repository, jobId) {
          WHERE id = $1`,
         [repository.id, JSON.stringify({ index_error: error instanceof Error ? error.message.slice(0, 1000) : "index_failed" })]
       ).catch((updateError) => console.error("repository index status update failed", updateError));
+      operationalLog("error", "indexação", `Indexação de ${repository.name} falhou.`, { workspace: workspace.slug, repository: repository.name, job_id: jobId, error: error instanceof Error ? error.message : error });
     }).finally(() => void runIndexScheduler());
 }
 
@@ -3901,6 +3951,7 @@ async function addRepository(workspaceIdOrSlug, payload) {
   );
 
   await enqueueRepositoryIndex(workspace, updated.rows[0]);
+  operationalLog("success", "repositórios", `Repositório ${name} clonado e enviado para indexação.`, { workspace: workspace.slug, repository: name, branch: defaultBranch });
   return updated.rows[0];
 }
 
@@ -3941,6 +3992,7 @@ async function deleteRepository(workspaceIdOrSlug, repositoryId) {
 
   await cleanupRepositoryIndex(repository.id);
   await query("DELETE FROM repositories WHERE id = $1", [repository.id]);
+  operationalLog("warning", "repositórios", "Repositório removido do workspace e dos índices.", { workspace: workspace.slug, repository_id: repository.id });
   return { deleted: true };
 }
 
@@ -4305,6 +4357,30 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (req.method === "GET" && url.pathname === "/api/logs") {
+    const after = Math.max(0, Number(url.searchParams.get("after") || 0));
+    const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit") || 200)));
+    const level = String(url.searchParams.get("level") || "all");
+    const component = String(url.searchParams.get("component") || "all");
+    const params = [level, component, limit];
+    const afterClause = after > 0 ? "AND id > $4" : "";
+    if (after > 0) params.push(after);
+    const rows = await query(
+      `SELECT id::text, created_at AS timestamp, level, component, message, context
+       FROM (
+         SELECT id, created_at, level, component, message, context
+         FROM operational_logs
+         WHERE ($1 = 'all' OR level = $1) AND ($2 = 'all' OR component = $2) ${afterClause}
+         ORDER BY id ${after > 0 ? "ASC" : "DESC"}
+         LIMIT $3
+       ) selected ORDER BY id ASC`,
+      params
+    );
+    const summary = await query("SELECT COALESCE(MAX(id), 0)::text AS latest_id, COUNT(*)::int AS retained FROM operational_logs");
+    sendJson(res, 200, { entries: rows.rows, latest_id: summary.rows[0].latest_id, retained: summary.rows[0].retained });
+    return;
+  }
+
   if (req.method === "POST" && url.pathname === "/api/reconciler/run") {
     sendJson(res, 202, { result: await reconcileRepositories(), reconciler: repositoryReconcilerStatus() });
     return;
@@ -4457,13 +4533,16 @@ const server = http.createServer((req, res) => {
     if (res.statusCode >= 500) httpMetrics.errors += 1;
   });
   handleRequest(req, res).catch((error) => {
-    console.error(error);
+    operationalLog("error", "http", "Uma requisição administrativa falhou inesperadamente.", { route, error: error instanceof Error ? error.message : error });
     sendJson(res, 500, { error: "internal_error" });
   });
 });
 
 ensureApplicationSchema()
   .then(() => {
+    void purgeExpiredOperationalLogs().catch((error) => console.error("operational log retention failed", error));
+    setInterval(() => void purgeExpiredOperationalLogs().catch((error) => console.error("operational log retention failed", error)), 24 * 60 * 60 * 1000).unref();
+    operationalLog("success", "sistema", "Painel administrativo iniciado e pronto para operar.", { port, reconciler_enabled: repositoryReconcilerEnabled });
     void runIndexScheduler();
     setInterval(() => void runIndexScheduler(), 2000).unref();
     if (repositoryReconcilerEnabled) {
