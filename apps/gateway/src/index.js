@@ -14,7 +14,11 @@ const serviceRoutes = {
 const toolRoutes = {
   code_search_symbol: "code", code_get_class: "code", code_get_method: "code", code_find_references: "code",
   code_find_callers: "code", code_find_callees: "code", code_find_dependencies: "code",
-  code_search_code: "code", code_semantic_search_code: "code"
+  code_search_code: "code", code_semantic_search_code: "code", code_explain_architecture: "code",
+  code_analyze_impact: "code",
+  git_get_commit: "git", git_get_history: "git", git_get_pull_request: "git", git_get_diff: "git",
+  git_get_branch: "git", git_list_changed_files: "git", git_find_commits_touching_symbol: "git",
+  git_search_commit_message: "git"
 };
 
 const toolDescriptions = {
@@ -23,7 +27,13 @@ const toolDescriptions = {
   code_get_class: "Localiza classes, interfaces, records e structs.", code_get_method: "Localiza métodos e funções.",
   code_find_references: "Encontra referências, imports, dependências e chamadas de um símbolo.", code_find_callers: "Encontra chamadores de um símbolo.",
   code_find_callees: "Encontra chamadas originadas por um símbolo.", code_find_dependencies: "Encontra imports e dependências do código.",
-  code_explain_architecture: "Retorna dados para explicar a arquitetura indexada.", code_find_related_documents: "Encontra documentos relacionados ao código."
+  code_explain_architecture: "Retorna dados para explicar a arquitetura indexada.", code_find_related_documents: "Encontra documentos relacionados ao código.",
+  code_analyze_impact: "Analisa o impacto transitivo de alterar um símbolo ou arquivo.",
+  git_get_commit: "Obtém um commit do clone local.", git_get_history: "Lista o histórico do clone local.",
+  git_get_diff: "Obtém diff entre referências Git.", git_get_branch: "Obtém branch, HEAD e estado do clone local.",
+  git_list_changed_files: "Lista arquivos alterados entre referências.",
+  git_find_commits_touching_symbol: "Encontra commits cujo patch altera um símbolo.",
+  git_search_commit_message: "Pesquisa mensagens de commit."
 };
 
 function toolDefinition(name) {

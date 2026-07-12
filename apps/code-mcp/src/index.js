@@ -24,7 +24,7 @@ const pool = new Pool({
 const tools = [
   "code_search_symbol", "code_get_class", "code_get_method", "code_find_references", "code_find_callers",
   "code_find_callees", "code_find_dependencies", "code_explain_architecture", "code_find_related_documents",
-  "code_search_code", "code_semantic_search_code"
+  "code_search_code", "code_semantic_search_code", "code_analyze_impact"
 ];
 
 function sendJson(res, status, body) {
@@ -105,6 +105,14 @@ async function executeTool(tool, payload) {
     return searchRelationships(tool, workspace, payload, ["IMPORTS", "DEPENDS_ON"]);
   }
 
+  if (tool === "code_explain_architecture") {
+    return explainArchitecture(workspace, payload);
+  }
+
+  if (tool === "code_analyze_impact") {
+    return analyzeImpact(workspace, payload);
+  }
+
   return {
     status: "ok",
     tool,
@@ -115,6 +123,88 @@ async function executeTool(tool, payload) {
     relationships: [],
     note: "Consulta real ainda limitada a chunks e simbolos indexados. Use code_search_code, code_semantic_search_code ou code_search_symbol."
   };
+}
+
+async function explainArchitecture(workspace, payload) {
+  const repositoryFilter = payload.repository_id ? "AND r.id = $2" : "";
+  const params = payload.repository_id ? [workspace.id, payload.repository_id] : [workspace.id];
+  const [repositories, languages, centralSymbols, dependencies, grpc] = await Promise.all([
+    query(`SELECT r.id, r.name, r.default_branch, r.status, r.metadata,
+                  (SELECT COUNT(*) FROM code_index_files f WHERE f.repository_id = r.id AND f.status = 'indexed')::int AS indexed_files,
+                  (SELECT COUNT(*) FROM code_symbols s WHERE s.repository_id = r.id)::int AS symbols
+           FROM repositories r
+           WHERE r.workspace_id = $1 ${repositoryFilter}
+           ORDER BY r.name`, params),
+    query(`SELECT f.language, COUNT(*)::int AS files, COUNT(DISTINCT f.repository_id)::int AS repositories
+           FROM code_index_files f JOIN repositories r ON r.id = f.repository_id
+           WHERE f.workspace_id = $1 AND f.status = 'indexed' ${repositoryFilter}
+           GROUP BY f.language ORDER BY files DESC`, params),
+    query(`SELECT s.id, s.repository_id, r.name AS repository_name, s.symbol_type, s.name, s.full_name,
+                  s.file_path, s.start_line,
+                  ((SELECT COUNT(*) FROM code_relationships incoming WHERE incoming.target_symbol_id = s.id) +
+                   (SELECT COUNT(*) FROM code_relationships outgoing WHERE outgoing.source_symbol_id = s.id))::int AS degree
+           FROM code_symbols s JOIN repositories r ON r.id = s.repository_id
+           WHERE s.workspace_id = $1 ${repositoryFilter}
+           ORDER BY degree DESC, s.name LIMIT 30`, params),
+    query(`SELECT source_repo.id AS source_repository_id, source_repo.name AS source_repository,
+                  target_repo.id AS target_repository_id, target_repo.name AS target_repository,
+                  cr.relationship_type, COUNT(*)::int AS relationships,
+                  ROUND(AVG(COALESCE((cr.resolution_metadata->>'confidence')::numeric, 1)), 2) AS confidence
+           FROM code_relationships cr
+           JOIN repositories source_repo ON source_repo.id = cr.repository_id
+           JOIN repositories target_repo ON target_repo.id = cr.target_repository_id
+           WHERE cr.workspace_id = $1 AND cr.target_repository_id <> cr.repository_id ${payload.repository_id ? "AND (cr.repository_id = $2 OR cr.target_repository_id = $2)" : ""}
+           GROUP BY source_repo.id, target_repo.id, cr.relationship_type ORDER BY relationships DESC LIMIT 50`, params),
+    query(`SELECT cr.repository_id, source_repo.name AS repository_name, cr.source_file_path, cr.start_line,
+                  cr.target_repository_id, target_repo.name AS target_repository_name, cr.target_name,
+                  cr.relationship_type, cr.resolution_status, cr.resolution_metadata
+           FROM code_relationships cr JOIN repositories source_repo ON source_repo.id = cr.repository_id
+           LEFT JOIN repositories target_repo ON target_repo.id = cr.target_repository_id
+           WHERE cr.workspace_id = $1 AND (cr.language = 'protobuf' OR cr.resolution_metadata->>'domain' = 'grpc')
+             ${payload.repository_id ? "AND (cr.repository_id = $2 OR cr.target_repository_id = $2)" : ""}
+           ORDER BY COALESCE((cr.resolution_metadata->>'confidence')::numeric, 0) DESC LIMIT 50`, params)
+  ]);
+  return { status: "ok", tool: "code_explain_architecture", workspace: workspace.slug,
+    repository_id: payload.repository_id || null, repositories: repositories.rows, languages: languages.rows,
+    central_symbols: centralSymbols.rows, cross_repository_dependencies: dependencies.rows, grpc_relationships: grpc.rows };
+}
+
+async function analyzeImpact(workspace, payload) {
+  const search = String(payload.symbol || payload.file_path || payload.query || "").trim();
+  if (!search) { const error = new Error("symbol_or_file_required"); error.status = 400; throw error; }
+  const limit = Math.min(Number(payload.limit || 100), 250);
+  const params = [workspace.id, `%${search}%`];
+  let repoSql = "";
+  if (payload.repository_id) { params.push(payload.repository_id); repoSql = `AND seed.repository_id = $${params.length}`; }
+  params.push(limit);
+  const result = await query(
+    `WITH seed AS (
+       SELECT id, repository_id, name, full_name, file_path, start_line FROM code_symbols
+       WHERE workspace_id = $1 AND (name ILIKE $2 OR full_name ILIKE $2 OR file_path ILIKE $2)
+     ), impacted AS (
+       SELECT DISTINCT seed.id AS seed_id, cr.id AS relationship_id, 1 AS depth,
+              cr.repository_id, cr.source_name, cr.source_file_path, cr.start_line,
+              cr.relationship_type, cr.resolution_status, cr.resolution_metadata
+       FROM seed JOIN code_relationships cr ON cr.target_symbol_id = seed.id
+       WHERE TRUE ${repoSql}
+       UNION
+       SELECT DISTINCT seed.id, second.id, 2, second.repository_id, second.source_name,
+              second.source_file_path, second.start_line, second.relationship_type,
+              second.resolution_status, second.resolution_metadata
+       FROM seed
+       JOIN code_relationships first ON first.target_symbol_id = seed.id
+       JOIN code_relationships second ON second.target_symbol_id = first.source_symbol_id
+       WHERE TRUE ${repoSql}
+     )
+     SELECT impacted.*, seed.name AS changed_symbol, seed.full_name AS changed_symbol_full_name,
+            seed.file_path AS changed_file, r.name AS impacted_repository
+     FROM impacted JOIN seed ON seed.id = impacted.seed_id JOIN repositories r ON r.id = impacted.repository_id
+     ORDER BY impacted.depth, impacted.repository_id, impacted.source_file_path, impacted.start_line
+     LIMIT $${params.length}`, params);
+  const files = [...new Set(result.rows.map((row) => `${row.impacted_repository}:${row.source_file_path}`))];
+  return { status: "ok", tool: "code_analyze_impact", workspace: workspace.slug, query: search,
+    summary: { relationships: result.rows.length, impacted_files: files.length, max_depth: result.rows.reduce((m, r) => Math.max(m, r.depth), 0) },
+    impacts: result.rows };
 }
 
 async function searchRelationships(tool, workspace, payload, relationshipTypes, options = {}) {

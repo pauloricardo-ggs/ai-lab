@@ -69,6 +69,15 @@ const els = {
   indexHistoryList: document.querySelector("#indexHistoryList"),
   indexPagination: document.querySelector("#indexPagination"),
   queueControls: document.querySelector("#queueControls"),
+  graphCanvas: document.querySelector("#graphCanvas"),
+  graphInspector: document.querySelector("#graphInspector"),
+  graphTypeFilter: document.querySelector("#graphTypeFilter"),
+  graphWorkspace: document.querySelector("#graphWorkspace"),
+  graphSearch: document.querySelector("#graphSearch"),
+  graphLimit: document.querySelector("#graphLimit"),
+  graphStats: document.querySelector("#graphStats"),
+  reloadGraph: document.querySelector("#reloadGraph"),
+  openWorkspaceGraph: document.querySelector("#openWorkspaceGraph"),
   mcpStatus: document.querySelector("#mcpStatus"),
   mcpBaseUrl: document.querySelector("#mcpBaseUrl"),
   mcpConfigExample: document.querySelector("#mcpConfigExample"),
@@ -138,17 +147,19 @@ function routeTo(route) {
   const titles = {
     dashboard: "Visão geral",
     admin: "Workspaces",
+    graph: "Explorador do grafo",
     mcp: "MCP Gateway"
   };
   els.pageTitle.textContent = titles[route] || "Dashboard";
 
-  const path = route === "dashboard" ? "/" : route === "mcp" ? "/services/mcp-gateway" : "/admin";
+  const path = route === "dashboard" ? "/" : route === "mcp" ? "/services/mcp-gateway" : route === "graph" ? "/graph" : "/admin";
   if (window.location.pathname !== path) {
     history.pushState({ route }, "", path);
   }
 }
 
 function routeFromPath() {
+  if (window.location.pathname.startsWith("/graph")) return "graph";
   if (window.location.pathname.startsWith("/admin")) {
     return "admin";
   }
@@ -869,6 +880,11 @@ async function loadWorkspaces() {
     }
   }
   renderWorkspaces();
+  if (els.graphWorkspace) {
+    const selected = els.graphWorkspace.value;
+    els.graphWorkspace.innerHTML = `<option value="">Selecione um workspace</option>${state.workspaces.map((workspace) => `<option value="${escapeHtml(workspace.slug)}">${escapeHtml(workspace.name)}</option>`).join("")}`;
+    if (state.workspaces.some((workspace) => workspace.slug === selected)) els.graphWorkspace.value = selected;
+  }
 }
 
 async function loadMcp() {
@@ -920,6 +936,70 @@ async function selectWorkspace(slug) {
     loadIndexJobs(slug)
   ]);
   renderRepositories(repos);
+}
+
+async function loadGraph(slug = els.graphWorkspace?.value || state.selectedWorkspace?.slug) {
+  if (!slug || !els.graphCanvas) return;
+  els.graphCanvas.innerHTML = `<div class="empty-state">Carregando grafo…</div>`;
+  els.reloadGraph.disabled = true;
+  try {
+    const limit = Number(els.graphLimit?.value || 60);
+    state.graph = await api(`/api/workspaces/${encodeURIComponent(slug)}/graph?limit=${limit}`);
+    renderGraph();
+  } catch (error) {
+    els.graphCanvas.innerHTML = `<div class="empty-state">Grafo indisponível: ${escapeHtml(error.message)}</div>`;
+  } finally {
+    els.reloadGraph.disabled = false;
+  }
+}
+
+function renderGraph() {
+  if (!els.graphCanvas || !state.graph) return;
+  const filter = els.graphTypeFilter?.value || "all";
+  const search = (els.graphSearch?.value || "").trim().toLocaleLowerCase("pt-BR");
+  const nodes = (state.graph.nodes || []).filter((node) => (filter === "all" || node.type === filter) && (!search || `${node.label} ${node.kind || ""}`.toLocaleLowerCase("pt-BR").includes(search)));
+  const visible = new Set(nodes.map((node) => node.id));
+  const edges = (state.graph.edges || []).filter((edge) => visible.has(edge.source) && visible.has(edge.target));
+  if (!nodes.length) {
+    els.graphCanvas.innerHTML = `<div class="empty-state">Nenhum nó encontrado para este filtro.</div>`;
+    return;
+  }
+  if (els.graphStats) els.graphStats.textContent = `${nodes.length} nós · ${edges.length} relações${state.graph.truncated ? " · recorte limitado" : ""}`;
+  const width = 1400, height = 780;
+  const byType = new Map();
+  nodes.forEach((node) => { const list = byType.get(node.type) || []; list.push(node); byType.set(node.type, list); });
+  const columns = [...byType.entries()];
+  const positions = new Map();
+  columns.forEach(([type, list], column) => list.forEach((node, row) => positions.set(node.id, {
+    x: 100 + column * ((width - 200) / Math.max(1, columns.length - 1)),
+    y: 55 + row * ((height - 110) / Math.max(1, list.length - 1)), type
+  })));
+  const colors = { repository: "#c7f36b", file: "#70b7ff", symbol: "#c99cff", reference: "#ffad66" };
+  const degrees = new Map();
+  edges.forEach((edge) => { degrees.set(edge.source, (degrees.get(edge.source) || 0) + 1); degrees.set(edge.target, (degrees.get(edge.target) || 0) + 1); });
+  els.graphCanvas.innerHTML = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="Grafo técnico do workspace"><g class="graph-viewport">
+    <g class="graph-edges">${edges.map((edge) => { const a = positions.get(edge.source), b = positions.get(edge.target); return `<line x1="${a.x}" y1="${a.y}" x2="${b.x}" y2="${b.y}"><title>${escapeHtml(edge.type)}</title></line>`; }).join("")}</g>
+    <g class="graph-nodes">${nodes.map((node) => { const p = positions.get(node.id); const degree = degrees.get(node.id) || 0; return `<g class="graph-node" data-graph-node="${escapeHtml(node.id)}" transform="translate(${p.x} ${p.y})"><circle r="${node.type === "repository" ? 12 : Math.min(10, 5 + Math.sqrt(degree))}" fill="${colors[node.type] || "#aaa"}"></circle>${nodes.length <= 140 || node.type === "repository" ? `<text x="14" y="4">${escapeHtml(String(node.label).slice(0, 36))}</text>` : ""}<title>${escapeHtml(node.label)} · ${escapeHtml(node.type)} · ${degree} relações</title></g>`; }).join("")}</g>
+  </g></svg>`;
+  enableGraphNavigation();
+}
+
+function enableGraphNavigation() {
+  const svg = els.graphCanvas.querySelector("svg"), viewport = svg?.querySelector(".graph-viewport");
+  if (!svg || !viewport) return;
+  let x = 0, y = 0, scale = 1, dragging = false, startX = 0, startY = 0;
+  const apply = () => viewport.setAttribute("transform", `translate(${x} ${y}) scale(${scale})`);
+  svg.addEventListener("wheel", (event) => { event.preventDefault(); scale = Math.min(2.5, Math.max(.45, scale * (event.deltaY < 0 ? 1.1 : .9))); apply(); }, { passive: false });
+  svg.addEventListener("pointerdown", (event) => { dragging = true; startX = event.clientX - x; startY = event.clientY - y; svg.setPointerCapture(event.pointerId); });
+  svg.addEventListener("pointermove", (event) => { if (!dragging) return; x = event.clientX - startX; y = event.clientY - startY; apply(); });
+  svg.addEventListener("pointerup", () => { dragging = false; });
+}
+
+function inspectGraphNode(id) {
+  const node = state.graph?.nodes?.find((item) => item.id === id);
+  if (!node) return;
+  const related = (state.graph.edges || []).filter((edge) => edge.source === id || edge.target === id);
+  els.graphInspector.innerHTML = `<span class="section-kicker">${escapeHtml(node.type)}</span><h3>${escapeHtml(node.label)}</h3>${node.kind ? `<code>${escapeHtml(node.kind)}</code>` : ""}<p>${related.length} relações visíveis</p><ul>${related.slice(0, 30).map((edge) => `<li><strong>${escapeHtml(edge.type)}</strong><span>${escapeHtml(edge.source === id ? edge.target : edge.source)}</span></li>`).join("")}</ul>`;
 }
 
 async function refreshAll() {
@@ -984,6 +1064,8 @@ function closeRepoModal() {
 }
 
 document.addEventListener("click", async (event) => {
+  const graphNode = event.target.closest("[data-graph-node]");
+  if (graphNode) inspectGraphNode(graphNode.dataset.graphNode);
   const repoSourceTab = event.target.closest("[data-repo-source]");
   if (repoSourceTab) {
     setRepoSourceMode(repoSourceTab.dataset.repoSource);
@@ -1128,6 +1210,19 @@ document.addEventListener("click", async (event) => {
       toast(error.message);
     }
   }
+});
+
+els.reloadGraph?.addEventListener("click", () => loadGraph());
+els.graphTypeFilter?.addEventListener("change", renderGraph);
+els.graphSearch?.addEventListener("input", renderGraph);
+els.graphWorkspace?.addEventListener("change", () => {
+  state.graph = null;
+  els.graphCanvas.innerHTML = `<div class="empty-state">Clique em “Carregar recorte” para consultar este workspace.</div>`;
+  els.graphStats.textContent = els.graphWorkspace.value ? "Pronto para carregar." : "Selecione um workspace para começar.";
+});
+els.openWorkspaceGraph?.addEventListener("click", () => {
+  if (state.selectedWorkspace && els.graphWorkspace) els.graphWorkspace.value = state.selectedWorkspace.slug;
+  routeTo("graph");
 });
 
 els.refreshButton.addEventListener("click", refreshAll);

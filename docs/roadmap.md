@@ -726,12 +726,12 @@ Arquivos provaveis:
 - Trocar heuristicas de TS/JS por parser mais robusto quando necessario.
 - Avaliar Tree-sitter para linguagens nao C#.
 - Melhorar resolucao de imports com aliases (`tsconfig.paths`, Dart packages, Swift modules).
-- Melhorar resolucao de imports Protobuf com include paths e dependencias externas conhecidas.
-- Identificar consumidores e provedores gRPC a partir de protos, clientes gerados e configuracoes, com nivel de confianca explicito.
+- Evoluir a resolucao Protobuf cross-repo ja suportada por `metadata.proto_include_paths` para dependencias externas fora do workspace.
+- Ampliar a inferencia de consumidores/provedores gRPC, que ja registra papel, estrategia e confianca, para mais geradores e frameworks.
 - Melhorar resolucao SQL por schema.
 - Diferenciar chamadas locais, chamadas externas e chamadas de framework.
 - Calcular metricas de centralidade no grafo.
-- Persistir commit SHA indexado.
+- Manter o commit SHA indexado consistente entre repositorio, job e atualizacoes incrementais.
 - Manter cobertura de recuperacao de jobs persistidos apos reinicio; o scheduler ativo permanece em memoria, mas os jobs e a fila ja sao persistidos.
 - Adicionar retry por arquivo e por fase.
 
@@ -748,8 +748,8 @@ Arquivos provaveis:
 ### MCP
 
 - Implementar Knowledge MCP real.
-- Implementar Git MCP real.
-- Implementar `code.explain_architecture`.
+- Ampliar o Git MCP local ja funcional com integracao opcional a provedores para pull requests.
+- Evoluir `code.explain_architecture` e `code_analyze_impact`, hoje baseados nos dados reais do indice, com caminhos Neo4j mais longos.
 - Implementar `code.find_related_documents`.
 - Adicionar respostas padronizadas com `sources`.
 - Melhorar erros MCP com codigo, mensagem e acao recomendada.

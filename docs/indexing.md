@@ -106,12 +106,23 @@ A tabela `code_index_files` mantem um inventario por arquivo com caminho, lingua
 
 Durante a reindexacao:
 
-1. arquivos inalterados pelo hash sao preservados
-2. arquivos novos ou alterados sao limpos e reprocessados
-3. arquivos removidos do repositorio sao removidos de PostgreSQL, Qdrant e Neo4j
-4. arquivos ignorados sao registrados com motivo
-5. erros isolados por arquivo ficam no inventario e aparecem no relatorio de qualidade
-6. relacoes do workspace sao re-resolvidas para refletir arquivos, simbolos e repositorios novos, alterados ou removidos
+1. o clone Git local faz `fetch --prune` e avanca com `merge --ff-only` a partir da branch remota, sem reescrever historico local
+2. o `HEAD` usado na indexacao e registrado em `code_index_jobs.indexed_commit_sha` e `repositories.indexed_commit_sha`
+3. o estado sujo do worktree fica explicito em `code_index_jobs.repository_dirty` e nas metricas do job
+4. arquivos inalterados pelo hash sao preservados
+5. arquivos novos ou alterados sao limpos e reprocessados
+6. arquivos removidos do repositorio sao removidos de PostgreSQL, Qdrant e Neo4j
+7. arquivos ignorados sao registrados com motivo
+8. erros isolados por arquivo ficam no inventario e aparecem no relatorio de qualidade
+9. relacoes do workspace sao re-resolvidas para refletir arquivos, simbolos e repositorios novos, alterados ou removidos
+
+## Testes do Roslyn Indexer
+
+A extracao C# e isolada em `RoslynCodeAnalyzer`, permitindo testar o mesmo codigo usado pelo endpoint `/analyze` sem subir o servico. A suite cobre simbolos e hierarquia, linhas, tipos C#, imports, heranca, chamadas, criacao de objetos, codigo parcialmente nao resolvido e entrada vazia.
+
+```bash
+dotnet test workers/roslyn-indexer.tests/RoslynIndexer.Tests.csproj
+```
 
 ## Resolucao de Relacoes
 

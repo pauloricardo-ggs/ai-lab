@@ -1,0 +1,6 @@
+{
+  "documents": [
+    { "document_id": "policy-v1", "source": "digital-policy.html", "pages": [{ "page": 1, "text": "Política de reembolso. Solicitações devem ser abertas em até 30 dias após a compra. O comprovante fiscal é obrigatório para valores acima de R$ 500,00." }], "citations": [{ "document_id": "policy-v1", "source": "digital-policy.html", "page": 1, "chunk_id": "policy-v1:p1:c1", "quote": "Solicitações devem ser abertas em até 30 dias após a compra." }] },
+    { "document_id": "invoice-0042", "source": "scanned-invoice.svg", "pages": [{ "page": 1, "text": "NOTA DE SERVIÇO 2026-0042. Fornecedor: Oficina Horizonte Ltda. Cliente: Empresa Exemplo S.A. Serviço: manutenção preventiva. Valor total: R$ 1.284,90. Vencimento: 15/08/2026. Código de validação: HZ-42-2026." }], "citations": [{ "document_id": "invoice-0042", "source": "scanned-invoice.svg", "page": 1, "chunk_id": "invoice-0042:p1:c1", "quote": "Valor total: R$ 1.284,90." }] }
+  ]
+}

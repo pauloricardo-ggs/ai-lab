@@ -5,7 +5,9 @@ FROM ${DOTNET_SDK_IMAGE} AS build
 WORKDIR /src
 COPY RoslynIndexer.csproj ./
 RUN dotnet restore
-COPY Program.cs ./
+# O analisador e os contratos HTTP vivem em arquivos C# separados. Copiar todas
+# as fontes evita que o build Docker fique diferente do build local do projeto.
+COPY *.cs ./
 RUN dotnet publish -c Release -o /app --no-restore
 
 FROM ${DOTNET_ASPNET_IMAGE}

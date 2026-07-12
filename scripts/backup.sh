@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-source .env
+source "${ENV_FILE:-.env}"
 
-BACKUP_DIR="./backups/$(date +%F_%H-%M-%S)"
+BACKUP_ROOT="${BACKUP_ROOT:-./backups}"
+BACKUP_DIR="$BACKUP_ROOT/$(date +%F_%H-%M-%S)"
 mkdir -p "$BACKUP_DIR"
 
 docker_cmd() {
@@ -26,5 +27,12 @@ tar -czf "$BACKUP_DIR/neo4j.tar.gz" ./data/neo4j
 
 echo "Backup Open WebUI..."
 tar -czf "$BACKUP_DIR/open-webui.tar.gz" ./data/open-webui
+
+cat > "$BACKUP_DIR/manifest.txt" <<EOF
+format=ai-platform-backup-v1
+created_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+postgres_database=$POSTGRES_DB
+EOF
+(cd "$BACKUP_DIR" && shasum -a 256 postgres.sql qdrant.tar.gz neo4j.tar.gz open-webui.tar.gz > SHA256SUMS)
 
 echo "Backup concluido em $BACKUP_DIR"

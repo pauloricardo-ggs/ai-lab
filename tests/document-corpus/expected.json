@@ -1,0 +1,6 @@
+{
+  "documents": [
+    { "id": "policy-v1", "source": "digital-policy.html", "mode": "text", "required_terms": ["Política de reembolso", "30 dias", "comprovante fiscal", "R$ 500,00"], "pages": 1 },
+    { "id": "invoice-0042", "source": "scanned-invoice.svg", "mode": "ocr", "required_terms": ["NOTA DE SERVIÇO 2026-0042", "Oficina Horizonte", "manutenção preventiva", "R$ 1.284,90", "15/08/2026", "HZ-42-2026"], "pages": 1 }
+  ]
+}

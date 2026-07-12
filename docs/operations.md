@@ -84,6 +84,19 @@ Valide a detecção no log antes de aumentar a concorrência de indexação. O a
 ./scripts/backup.sh
 ```
 
+Cada backup contém manifesto e checksums. Valide periodicamente sem alterar dados:
+
+```bash
+./scripts/restore.sh --verify-only backups/<data-hora>
+./tests/restore-verify.test.sh
+```
+
+Para restaurar, pare cargas de escrita e execute `./scripts/restore.sh --yes backups/<data-hora>`. O procedimento verifica integridade antes de parar serviços, restaura PostgreSQL, Qdrant, Neo4j e Open WebUI, e então reinicia a stack. Faça um ensaio em host isolado após upgrades relevantes.
+
+## Observabilidade
+
+O Admin expõe métricas Prometheus em `GET /metrics` (uptime, requisições, erros, duração acumulada e jobs ativos). A indexação registra tempos por estágio no histórico da interface. Colete também logs estruturados via `docker compose logs` e alerte para serviços offline, crescimento de erros HTTP e jobs presos.
+
 ## Upgrade de Imagens
 
 Nunca use `latest` ou `main`.

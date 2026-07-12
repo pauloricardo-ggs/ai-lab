@@ -19,6 +19,7 @@
           <p class="nav-label">Operação</p>
           <a href="/" data-route="dashboard" class="active"><span class="nav-icon">⌂</span>Visão geral</a>
           <a href="/admin" data-route="admin"><span class="nav-icon">◇</span>Workspaces</a>
+          <a href="/graph" data-route="graph"><span class="nav-icon">⌘</span>Grafo</a>
           <p class="nav-label">Integrações</p>
           <a href="/services/mcp-gateway" data-route="mcp"><span class="nav-icon">↗</span>MCP Gateway</a>
         </nav>
@@ -116,6 +117,11 @@
                 <div id="qualityReportBody"></div>
               </section>
 
+              <section class="workspace-section graph-launch-card">
+                <div><span class="section-kicker">Topologia</span><h2>Explorador visual</h2><p>Abra o grafo em uma tela dedicada, com carregamento controlado para bases grandes.</p></div>
+                <button id="openWorkspaceGraph" class="secondary-button" type="button">Abrir grafo →</button>
+              </section>
+
               <section class="workspace-section panel">
                 <div class="panel-header"><div><span class="section-kicker">Auditoria</span><h2>Histórico de indexações</h2></div><span id="indexHistorySummary" class="status-pill muted">0 jobs</span></div>
                 <div id="indexHistoryList" class="job-list compact-jobs"></div>
@@ -123,6 +129,21 @@
               </section>
             </div>
           </div>
+        </section>
+
+        <section id="view-graph" class="view graph-view">
+          <section class="graph-header panel">
+            <div><span class="section-kicker">Topologia técnica</span><h2>Explorador do grafo</h2><p>Carregue apenas o recorte necessário. Nada é buscado até você solicitar.</p></div>
+            <div class="graph-workspace-control"><label for="graphWorkspace">Workspace</label><select id="graphWorkspace"><option value="">Selecione um workspace</option></select></div>
+          </section>
+          <section class="graph-toolbar panel">
+            <div><label for="graphSearch">Localizar no recorte</label><input id="graphSearch" type="search" placeholder="Arquivo, símbolo ou referência"></div>
+            <div><label for="graphTypeFilter">Tipo</label><select id="graphTypeFilter"><option value="all">Todos</option><option value="repository">Repositórios</option><option value="file">Arquivos</option><option value="symbol">Símbolos</option><option value="reference">Referências</option></select></div>
+            <div><label for="graphLimit">Tamanho do recorte</label><select id="graphLimit"><option value="30">Leve · 30 arquivos</option><option value="60" selected>Médio · 60 arquivos</option><option value="120">Amplo · 120 arquivos</option></select></div>
+            <button id="reloadGraph" class="primary-button" type="button">Carregar recorte</button>
+          </section>
+          <div id="graphStats" class="graph-stats muted-text">Selecione um workspace para começar.</div>
+          <section class="graph-layout graph-layout-dedicated"><div id="graphCanvas" class="graph-canvas"><div class="empty-state">O grafo não é carregado automaticamente para preservar o desempenho.</div></div><aside id="graphInspector" class="graph-inspector"><span class="muted-text">Selecione um nó para inspecionar relações.</span></aside></section>
         </section>
 
         <section id="view-mcp" class="view">

@@ -99,6 +99,10 @@ Documents** e confirme:
 - OCR habilitado;
 - Force OCR desabilitado;
 - OCR engine: `easyocr`;
+
+## Validação de OCR e citações
+
+O corpus de regressão fica em `tests/document-corpus/` e inclui documento digital e imagem para OCR, com termos e citações esperados. Rode `node tests/validate-document-corpus.mjs` no baseline ou informe uma saída nova do Docling no formato documentado no README do corpus. Essa validação rejeita citação sem documento, fonte, página, chunk ou trecho sustentado pelo texto extraído.
 - idiomas: `pt` e `en`;
 - PDF backend: `dlparse_v4`;
 - table mode: `accurate`.

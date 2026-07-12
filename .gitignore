@@ -3,6 +3,10 @@
 .DS_Store
 node_modules/
 npm-debug.log*
+**/bin/
+**/obj/
+TestResults/
+coverage/
 data/postgres/*
 !data/postgres/.gitkeep
 data/qdrant/*

@@ -18,7 +18,11 @@ Para registrar em um agente, use a URL `http://<IP_DO_SERVIDOR>:7000/mcp` e o he
 - `code_search_code`
 - `code_semantic_search_code`
 
-Na versao atual, `code_search_code`, `code_semantic_search_code`, `code_search_symbol`, `code_get_class`, `code_get_method`, `code_find_references`, `code_find_callers`, `code_find_callees` e `code_find_dependencies` consultam os dados reais gerados pela indexacao de repositorios. Esses são nomes MCP públicos; o Gateway os converte para os nomes internos dos serviços.
+Na versao atual, `code_search_code`, `code_semantic_search_code`, `code_search_symbol`, `code_get_class`, `code_get_method`, `code_find_references`, `code_find_callers`, `code_find_callees`, `code_find_dependencies`, `code_explain_architecture` e `code_analyze_impact` consultam os dados reais gerados pela indexacao de repositorios. A explicacao agrega repositorios, linguagens, simbolos centrais, dependencias cross-repo e relacoes gRPC; o impacto percorre chamadores diretos e indiretos com repositorio, arquivo e linha.
+
+As tools `git_get_commit`, `git_get_history`, `git_get_diff`, `git_get_branch`, `git_list_changed_files`, `git_find_commits_touching_symbol` e `git_search_commit_message` executam Git diretamente no clone local registrado para o repositorio. Informe `repository_id` (ou `repository`) quando o workspace possuir mais de um repositorio. O caminho vindo do banco e validado contra `REPOS_ROOT` antes da execucao.
+
+Imports Protobuf podem cruzar repositorios quando o repositorio consumidor configura `metadata.proto_include_paths` (ou `protobuf_include_paths`) com nomes/IDs dos repositorios provedores, por exemplo `["contracts"]` ou `[{"repository":"contracts","include_path":"proto"}]`. A resolucao registra estrategia e confianca; clientes/provedores gRPC inferidos por convencao tambem recebem `domain=grpc`, `grpc_role` e confianca explicita.
 
 As tools de relacao retornam tambem os campos de resolucao quando disponiveis:
 

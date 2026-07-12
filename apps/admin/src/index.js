@@ -134,6 +134,8 @@ const indexIgnoreMigrations = String(process.env.INDEX_IGNORE_MIGRATIONS || "tru
 const configuredIndexConcurrency = Math.min(3, Math.max(1, Number(process.env.INDEX_MAX_CONCURRENT_REPOSITORIES || 1)));
 const activeIndexJobs = new Map();
 const activeIndexStatuses = ["queued", "running", "paused", "canceling"];
+const processStartedAt = Date.now();
+const httpMetrics = { requests: 0, errors: 0, durationsMs: 0, byRoute: new Map() };
 
 class IndexCanceledError extends Error {
   constructor() {
@@ -530,6 +532,10 @@ async function ensureApplicationSchema() {
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS worker_id TEXT");
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS started_after TIMESTAMP");
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS metrics JSONB NOT NULL DEFAULT '{}'");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS indexed_commit_sha TEXT");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS repository_dirty BOOLEAN NOT NULL DEFAULT FALSE");
+  await query("ALTER TABLE repositories ADD COLUMN IF NOT EXISTS indexed_commit_sha TEXT");
+  await query("ALTER TABLE repositories ADD COLUMN IF NOT EXISTS indexed_at TIMESTAMP");
   await query("ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS parent_name TEXT");
   await query("ALTER TABLE code_symbols ADD COLUMN IF NOT EXISTS parent_full_name TEXT");
   await query("ALTER TABLE code_relationships ADD COLUMN IF NOT EXISTS source_symbol_id UUID REFERENCES code_symbols(id) ON DELETE SET NULL");
@@ -973,6 +979,42 @@ function runGitClone(url, branch, targetPath) {
   });
 }
 
+function runGit(repositoryPath, args, { allowFailure = false } = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("git", ["-C", repositoryPath, ...args], { env: process.env, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("close", (code) => {
+      const result = { code, stdout: stdout.trim(), stderr: sanitizeSecret(stderr.trim()) };
+      if (code === 0 || allowFailure) return resolve(result);
+      const error = new Error(result.stderr || result.stdout || `git_command_failed_${code}`);
+      error.status = 500;
+      reject(error);
+    });
+    child.on("error", reject);
+  });
+}
+
+async function synchronizeRepositoryClone(repository) {
+  const gitCheck = await runGit(repository.local_path, ["rev-parse", "--is-inside-work-tree"], { allowFailure: true });
+  if (gitCheck.code !== 0 || gitCheck.stdout !== "true") {
+    throw Object.assign(new Error("repository_is_not_a_git_worktree"), { status: 409 });
+  }
+  const remote = await runGit(repository.local_path, ["remote", "get-url", "origin"], { allowFailure: true });
+  if (remote.code === 0) {
+    await runGit(repository.local_path, ["fetch", "--prune", "origin"]);
+    const branch = repository.default_branch || "main";
+    await runGit(repository.local_path, ["merge", "--ff-only", `origin/${branch}`]);
+  }
+  const [head, status] = await Promise.all([
+    runGit(repository.local_path, ["rev-parse", "HEAD"]),
+    runGit(repository.local_path, ["status", "--porcelain", "--untracked-files=normal"])
+  ]);
+  return { commitSha: head.stdout, dirty: Boolean(status.stdout), remoteUpdated: remote.code === 0 };
+}
+
 function authenticatedCloneUrl(url) {
   const token = process.env.GITHUB_TOKEN || "";
   if (!token || !url.startsWith("https://github.com/")) {
@@ -1056,6 +1098,15 @@ async function indexRepository(workspace, repository, jobId) {
 
   try {
     assertIndexNotCanceled(controller.signal);
+    await updateIndexJob(jobId, { phase: "repository_sync" });
+    const revision = await synchronizeRepositoryClone(repository);
+    metrics.commit_sha = revision.commitSha;
+    metrics.repository_dirty = revision.dirty;
+    metrics.repository_remote_updated = revision.remoteUpdated;
+    await query(
+      "UPDATE code_index_jobs SET indexed_commit_sha = $2, repository_dirty = $3 WHERE id = $1",
+      [jobId, revision.commitSha, revision.dirty]
+    );
     await ensureQdrantCollection(codeCollection);
     assertIndexNotCanceled(controller.signal);
     await ensureNeo4jSchema();
@@ -1263,6 +1314,10 @@ async function indexRepository(workspace, repository, jobId) {
        WHERE id = $1`,
       [jobId, files.length, indexedChunks, indexedSymbols]
     );
+    await query(
+      `UPDATE repositories SET indexed_commit_sha = $2, indexed_at = NOW(), updated_at = NOW() WHERE id = $1`,
+      [repository.id, revision.commitSha]
+    );
     metrics.files = files.length;
     metrics.chunks = indexedChunks;
     await persistMetrics();
@@ -1363,6 +1418,8 @@ async function runIndexScheduler() {
              chunks_indexed = 0,
              symbols_indexed = 0,
              metrics = '{}'::jsonb,
+             indexed_commit_sha = NULL,
+             repository_dirty = FALSE,
              error = NULL,
              started_at = NOW(),
              started_after = NOW(),
@@ -1553,7 +1610,7 @@ async function resolveWorkspaceRelationships(workspaceId, onProgress) {
   const [relationships, symbols, repositories, files] = await Promise.all([
     query(
       `SELECT id, repository_id, relationship_type, source_name, target_name, source_file_path,
-              target_file_path, language, start_line
+              target_file_path, language, start_line, metadata
        FROM code_relationships
        WHERE workspace_id = $1`,
       [workspaceId]
@@ -1566,7 +1623,7 @@ async function resolveWorkspaceRelationships(workspaceId, onProgress) {
       [workspaceId]
     ),
     query(
-      `SELECT id, name, url
+      `SELECT id, name, url, metadata
        FROM repositories
        WHERE workspace_id = $1`,
       [workspaceId]
@@ -1667,7 +1724,7 @@ function resolveRelationship(relationship, context) {
       targetRepositoryId: localFile.repository_id,
       targetFilePath: localFile.file_path,
       status: "resolved_file",
-      metadata: { strategy: localFile.strategy }
+      metadata: { strategy: localFile.strategy, confidence: localFile.confidence || 1, ...(localFile.domain ? { domain: localFile.domain } : {}) }
     };
   }
 
@@ -1683,7 +1740,9 @@ function resolveRelationship(relationship, context) {
         strategy: symbol.repository_id === relationship.repository_id ? "same_repository_symbol" : "workspace_symbol",
         symbol_type: symbol.symbol_type,
         symbol_name: symbol.name,
-        symbol_full_name: symbol.full_name
+        symbol_full_name: symbol.full_name,
+        confidence: symbol.confidence || (symbol.repository_id === relationship.repository_id ? 0.95 : 0.8),
+        ...(symbol.domain ? { domain: symbol.domain, grpc_role: symbol.grpcRole } : {})
       }
     };
   }
@@ -1718,6 +1777,9 @@ function findTargetSymbol(relationship, context) {
     return null;
   }
 
+  const grpcTarget = inferGrpcTarget(relationship, context);
+  if (grpcTarget) return grpcTarget;
+
   const sameRepository = context.symbolsByRepo.get(relationship.repository_id) || [];
   const sameRepoMatch = rankTargetSymbols(relationship, sameRepository, targetNames)[0];
   if (sameRepoMatch) {
@@ -1726,6 +1788,19 @@ function findTargetSymbol(relationship, context) {
 
   const workspaceMatches = rankTargetSymbols(relationship, context.symbols, targetNames);
   return workspaceMatches[0]?.symbol || null;
+}
+
+function inferGrpcTarget(relationship, context) {
+  if (relationship.language === "protobuf") return null;
+  const raw = String(relationship.target_name || "");
+  const clientMatch = raw.match(/(?:^|\.)([A-Za-z_]\w*)(?:Client|ClientBase)(?:\.|$)/);
+  const providerMatch = raw.match(/(?:^|\.)([A-Za-z_]\w*)(?:Base|Impl|Service)(?:\.|$)/);
+  const serviceName = clientMatch?.[1] || providerMatch?.[1];
+  if (!serviceName) return null;
+  const normalized = normalizeLookupName(serviceName);
+  const candidates = context.symbols.filter((symbol) => symbol.symbol_type === "service" && normalizeLookupName(symbol.name) === normalized);
+  if (candidates.length !== 1) return null;
+  return { ...candidates[0], confidence: clientMatch ? 0.82 : 0.68, domain: "grpc", grpcRole: clientMatch ? "client" : "provider" };
 }
 
 function rankTargetSymbols(relationship, symbols, targetNames) {
@@ -1767,10 +1842,38 @@ function resolveFileTarget(relationship, context) {
   for (const candidate of candidates) {
     const file = files.find((item) => normalizePathForLookup(item.file_path) === normalizePathForLookup(candidate));
     if (file) {
-      return { ...file, strategy: "relative_import_path" };
+      return { ...file, strategy: "relative_import_path", confidence: 1 };
+    }
+  }
+
+  if (relationship.language === "protobuf") {
+    const sourceRepository = context.repositories.find((item) => item.id === relationship.repository_id);
+    for (const targetRepository of context.repositories) {
+      if (targetRepository.id === relationship.repository_id || !protobufRepositoryAllowed(sourceRepository, targetRepository)) continue;
+      const targetFiles = context.filesByRepo.get(targetRepository.id) || [];
+      for (const candidate of candidates) {
+        const normalizedCandidate = normalizePathForLookup(candidate);
+        const file = targetFiles.find((item) => {
+          const indexedPath = normalizePathForLookup(item.file_path);
+          return indexedPath === normalizedCandidate || indexedPath.endsWith(`/${normalizedCandidate}`);
+        });
+        if (file) return { ...file, strategy: "configured_cross_repository_proto_include", confidence: 0.98, domain: "grpc" };
+      }
     }
   }
   return null;
+}
+
+function protobufRepositoryAllowed(sourceRepository, targetRepository) {
+  const includes = sourceRepository?.metadata?.proto_include_paths || sourceRepository?.metadata?.protobuf_include_paths || [];
+  return (Array.isArray(includes) ? includes : [includes]).some((entry) => {
+    if (typeof entry === "string") {
+      const normalized = normalizeLookupName(entry.split(":")[0]);
+      return normalized === normalizeLookupName(targetRepository.id) || normalized === normalizeLookupName(targetRepository.name);
+    }
+    const target = entry?.repository_id || entry?.repository || entry?.repository_name;
+    return normalizeLookupName(target) === normalizeLookupName(targetRepository.id) || normalizeLookupName(target) === normalizeLookupName(targetRepository.name);
+  });
 }
 
 function resolveRepositoryTarget(targetName, context) {
@@ -3551,6 +3654,90 @@ async function runNeo4jStatements(statements) {
   }
 }
 
+async function queryNeo4j(statement, parameters = {}) {
+  if (!neo4jPassword) {
+    const error = new Error("neo4j_not_configured");
+    error.status = 503;
+    throw error;
+  }
+  const response = await fetch(`${neo4jUrl}/db/neo4j/tx/commit`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "authorization": `Basic ${Buffer.from(`neo4j:${neo4jPassword}`).toString("base64")}`
+    },
+    body: JSON.stringify({ statements: [{ statement, parameters, resultDataContents: ["row"] }] }),
+    signal: AbortSignal.timeout(neo4jTimeoutMs)
+  });
+  if (!response.ok) throw new Error(`neo4j_request_failed_${response.status}: ${await response.text()}`);
+  const body = await response.json();
+  if (body.errors?.length) throw new Error(`neo4j_statement_failed: ${JSON.stringify(body.errors).slice(0, 1000)}`);
+  return body.results?.[0]?.data?.map((item) => item.row) || [];
+}
+
+async function workspaceGraph(workspaceSlug, options = {}) {
+  const workspace = await getWorkspace(workspaceSlug);
+  if (!workspace) {
+    const error = new Error("workspace_not_found");
+    error.status = 404;
+    throw error;
+  }
+  const limit = Math.min(500, Math.max(10, Number(options.limit || 180)));
+  const rows = await queryNeo4j(`
+    MATCH (repo:Repository {workspace_id: $workspaceId})-[:CONTAINS]->(file:CodeFile)
+    OPTIONAL MATCH (file)-[:DECLARES]->(symbol:CodeSymbol)
+    WITH repo, file, collect(symbol)[0..4] AS symbols
+    OPTIONAL MATCH (file)-[rel:IMPORTS|CALLS|REFERENCES|DEPENDS_ON]->(reference:CodeReference)
+    RETURN repo.id, repo.name, file.key, file.path,
+           [s IN symbols | [s.key, coalesce(s.name, s.full_name), coalesce(s.kind, 'symbol')]],
+           collect(DISTINCT [type(rel), reference.key, coalesce(reference.name, reference.target, reference.key)])[0..8]
+    LIMIT $limit
+  `, { workspaceId: workspace.id, limit });
+  const nodes = new Map();
+  const edges = [];
+  const addNode = (id, label, type, metadata = {}) => {
+    if (id && !nodes.has(id)) nodes.set(id, { id, label: label || id, type, ...metadata });
+  };
+  for (const [repoId, repoName, fileKey, filePath, symbols, references] of rows) {
+    addNode(`repo:${repoId}`, repoName, "repository");
+    addNode(`file:${fileKey}`, filePath, "file");
+    edges.push({ source: `repo:${repoId}`, target: `file:${fileKey}`, type: "CONTAINS" });
+    for (const [symbolKey, symbolName, kind] of symbols || []) {
+      if (!symbolKey) continue;
+      addNode(`symbol:${symbolKey}`, symbolName, "symbol", { kind });
+      edges.push({ source: `file:${fileKey}`, target: `symbol:${symbolKey}`, type: "DECLARES" });
+    }
+    for (const [type, referenceKey, referenceName] of references || []) {
+      if (!type || !referenceKey) continue;
+      addNode(`reference:${referenceKey}`, referenceName, "reference");
+      edges.push({ source: `file:${fileKey}`, target: `reference:${referenceKey}`, type });
+    }
+  }
+  return { workspace: { id: workspace.id, slug: workspace.slug, name: workspace.name }, nodes: [...nodes.values()], edges, truncated: rows.length >= limit };
+}
+
+function prometheusMetrics() {
+  const lines = [
+    "# HELP ai_admin_uptime_seconds Admin process uptime.",
+    "# TYPE ai_admin_uptime_seconds gauge",
+    `ai_admin_uptime_seconds ${Math.floor((Date.now() - processStartedAt) / 1000)}`,
+    "# HELP ai_admin_http_requests_total HTTP requests handled.",
+    "# TYPE ai_admin_http_requests_total counter",
+    `ai_admin_http_requests_total ${httpMetrics.requests}`,
+    "# HELP ai_admin_http_errors_total HTTP responses with status >= 500.",
+    "# TYPE ai_admin_http_errors_total counter",
+    `ai_admin_http_errors_total ${httpMetrics.errors}`,
+    "# HELP ai_admin_http_request_duration_seconds_sum Total request duration.",
+    "# TYPE ai_admin_http_request_duration_seconds_sum counter",
+    `ai_admin_http_request_duration_seconds_sum ${(httpMetrics.durationsMs / 1000).toFixed(3)}`,
+    "# HELP ai_admin_index_jobs_active Active in-process indexing jobs.",
+    "# TYPE ai_admin_index_jobs_active gauge",
+    `ai_admin_index_jobs_active ${activeIndexJobs.size}`
+  ];
+  for (const [route, value] of httpMetrics.byRoute) lines.push(`ai_admin_http_route_requests_total{route="${route.replaceAll('"', '\\"')}"} ${value}`);
+  return `${lines.join("\n")}\n`;
+}
+
 async function runNeo4jStatementsBatched(statements, onProgress, batchSize = 250) {
   const total = statements.length;
   if (onProgress) await onProgress(0, total || 1);
@@ -4089,6 +4276,12 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  const graphParams = routeMatch(url.pathname, "/api/workspaces/:workspace/graph");
+  if (graphParams && req.method === "GET") {
+    sendJson(res, 200, await workspaceGraph(graphParams.workspace, { limit: url.searchParams.get("limit") }));
+    return;
+  }
+
   if (url.pathname === "/api/index-queue" && req.method === "GET") {
     sendJson(res, 200, await getQueueSettings());
     return;
@@ -4133,6 +4326,11 @@ async function handleApi(req, res, url) {
 async function handleRequest(req, res) {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
 
+  if (req.method === "GET" && url.pathname === "/metrics") {
+    sendText(res, 200, prometheusMetrics(), "text/plain; version=0.0.4; charset=utf-8");
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/health") {
     sendJson(res, 200, { status: "ok", service: "admin" });
     return;
@@ -4159,6 +4357,14 @@ async function handleRequest(req, res) {
 }
 
 const server = http.createServer((req, res) => {
+  const startedAt = Date.now();
+  httpMetrics.requests += 1;
+  const route = String(req.url || "/").split("?")[0].replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/gi, ":id");
+  httpMetrics.byRoute.set(route, (httpMetrics.byRoute.get(route) || 0) + 1);
+  res.on("finish", () => {
+    httpMetrics.durationsMs += Date.now() - startedAt;
+    if (res.statusCode >= 500) httpMetrics.errors += 1;
+  });
   handleRequest(req, res).catch((error) => {
     console.error(error);
     sendJson(res, 500, { error: "internal_error" });
