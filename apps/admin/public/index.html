@@ -101,6 +101,18 @@
             </section>
 
             <div id="repoEmptyState" class="empty-state">Selecione ou crie um workspace para gerenciar repositórios.</div>
+            <div id="repositoryExplorer" class="hidden">
+              <div class="detail-toolbar">
+                <button id="backToRepositories" class="text-button" type="button">← Repositórios do workspace</button>
+                <span id="repositoryExplorerId" class="code-chip">repository</span>
+              </div>
+              <section class="panel explorer-header">
+                <div><span class="section-kicker">Explorador do repositório</span><h2 id="repositoryExplorerTitle">Repositório</h2><p id="repositoryExplorerSubtitle">Dados técnicos consolidados, somente leitura.</p></div>
+                <span id="repositoryExplorerStatus" class="status-pill muted">-</span>
+              </section>
+              <div id="repositoryExplorerTabs" class="explorer-tabs" role="tablist"></div>
+              <section id="repositoryExplorerBody" class="workspace-section"></section>
+            </div>
             <div id="repoManager" class="hidden">
               <section class="workspace-section panel">
                 <div class="panel-header"><div><span class="section-kicker">Inventário</span><h2>Repositórios</h2></div><button id="openRepoModal" class="primary-button" type="button">＋ Adicionar repositório</button></div>
@@ -111,11 +123,6 @@
                 <div class="panel-header"><div><span class="live-dot"></span><span class="section-kicker">Tempo real</span><h2>Indexação</h2></div><span id="indexSummary" class="status-pill muted">Sem jobs</span></div>
                 <div id="queueControls" class="queue-controls"></div>
                 <div id="indexRunningList" class="job-list"></div>
-              </section>
-
-              <section id="qualityReportSection" class="workspace-section panel hidden">
-                <div class="panel-header"><div><span class="section-kicker">Diagnóstico</span><h2 id="qualityReportTitle">Qualidade do índice</h2></div><span id="qualityReportSummary" class="status-pill muted">-</span></div>
-                <div id="qualityReportBody"></div>
               </section>
 
               <section class="workspace-section graph-launch-card">
@@ -163,18 +170,62 @@
         </section>
 
         <section id="view-mcp" class="view">
-          <div class="mcp-layout">
-            <section class="panel">
-              <div class="panel-header"><div><span class="section-kicker">Endpoint técnico</span><h2>MCP Gateway</h2></div><span id="mcpStatus" class="status-pill muted">Verificando</span></div>
-              <div class="info-stack"><div><span>Base URL</span><code id="mcpBaseUrl">-</code></div><div><span>Autenticação</span><code>Authorization: Bearer &lt;GATEWAY_API_KEY&gt;</code></div><div><span>Escopo obrigatório</span><code>workspace_id ou workspace_slug</code></div></div>
-              <pre id="mcpConfigExample" class="code-block"></pre>
-            </section>
-            <section class="panel">
-              <div class="panel-header"><div><span class="section-kicker">Capacidades</span><h2>Tools publicadas</h2></div></div>
-              <p class="section-description">Use transporte Streamable HTTP. Cada chamada deve informar o workspace técnico para manter o isolamento.</p>
-              <div id="toolList" class="tool-list"></div>
-            </section>
+          <div class="mcp-tabs" role="tablist" aria-label="Tipo de integração MCP">
+            <button class="mcp-tab active" type="button" role="tab" aria-selected="true" data-mcp-tab="ide">IDE e agentes</button>
+            <button class="mcp-tab" type="button" role="tab" aria-selected="false" data-mcp-tab="open-webui">Open WebUI</button>
           </div>
+
+          <section id="mcpIdePanel" class="mcp-tab-panel active" role="tabpanel">
+            <div class="mcp-layout">
+              <section class="panel">
+                <div class="panel-header"><div><span class="section-kicker">Endpoint global</span><h2>IDE e agentes</h2></div><span id="mcpStatus" class="status-pill muted">Verificando</span></div>
+                <p class="section-description">Use uma URL única na IDE. A skill escolhe o <code>workspace_slug</code> pelo repositório atual.</p>
+                <div class="info-stack"><div><span>Base URL</span><code id="mcpBaseUrl">-</code></div><div><span>Autenticação</span><code>Authorization: Bearer &lt;GATEWAY_API_KEY&gt;</code></div><div><span>Escopo</span><code>Definido pela skill em cada tool call</code></div></div>
+                <pre id="mcpConfigExample" class="code-block"></pre>
+              </section>
+              <section class="panel">
+                <div class="panel-header"><div><span class="section-kicker">Capacidades</span><h2>Tools publicadas</h2></div></div>
+                <p class="section-description">A skill usa as tools adequadas e mantém o isolamento por workspace.</p>
+                <div id="toolList" class="tool-list"></div>
+              </section>
+            </div>
+            <section class="panel mcp-skill-panel">
+              <div class="panel-header"><div><span class="section-kicker">Skill pronta</span><h2>Roteamento por repositório</h2></div><button id="copyMcpSkill" class="secondary-button" type="button" disabled>Copiar SKILL.md</button></div>
+              <p class="section-description">Selecione todos os workspaces que o agente global pode atender.</p>
+              <div id="mcpSkillWorkspaceList" class="mcp-skill-workspaces"><div class="empty-state">Carregando workspaces…</div></div>
+              <div class="mcp-skill-actions"><span id="mcpSkillSummary" class="muted-text">Selecione ao menos um workspace.</span><button id="generateMcpSkill" class="primary-button" type="button">Gerar skill</button></div>
+              <div id="mcpSkillOutput" class="mcp-skill-output hidden">
+                <div class="skill-output-heading"><span>Arquivo sugerido</span><code id="mcpSkillFilename">SKILL.md</code></div>
+                <pre id="mcpSkillContent" class="code-block"></pre>
+              </div>
+            </section>
+          </section>
+
+          <section id="mcpOpenWebUiPanel" class="mcp-tab-panel" role="tabpanel">
+            <div class="mcp-layout">
+              <section class="panel">
+                <div class="panel-header"><div><span class="section-kicker">Endpoint fixado</span><h2>Open WebUI</h2></div></div>
+                <p class="section-description">Use um servidor MCP por modelo ou domínio. O Gateway impõe o workspace definido na URL.</p>
+                <div class="info-stack"><div><span>Formato da URL</span><code id="openWebUiEndpointTemplate">-</code></div><div><span>Autenticação</span><code>Authorization: Bearer &lt;GATEWAY_API_KEY&gt;</code></div><div><span>Escopo</span><code>Imposto pelo Gateway em toda tool call</code></div></div>
+              </section>
+              <section class="panel">
+                <div class="panel-header"><div><span class="section-kicker">Configuração</span><h2>Modelo dedicado</h2></div></div>
+                <p class="section-description">Selecione exatamente um workspace. O painel gera a URL que deve ser registrada no servidor MCP do Open WebUI e o prompt do sistema do modelo.</p>
+              </section>
+            </div>
+            <section class="panel mcp-skill-panel">
+              <div class="panel-header"><div><span class="section-kicker">Prompt pronto</span><h2>Workspace do modelo</h2></div></div>
+              <div id="openWebUiWorkspaceList" class="mcp-skill-workspaces"><div class="empty-state">Carregando workspaces…</div></div>
+              <div class="mcp-skill-actions"><span id="openWebUiWorkspaceSummary" class="muted-text">Selecione exatamente um workspace.</span><button id="generateOpenWebUiPrompt" class="primary-button" type="button" disabled>Gerar configuração Open WebUI</button></div>
+              <div id="openWebUiPromptOutput" class="mcp-skill-output hidden">
+                <div class="skill-output-heading"><span>Servidor MCP fixado</span><code id="openWebUiMcpUrl">-</code></div>
+                <p class="muted-text">Cadastre a URL acima em <strong>Admin → Settings → External Tools / MCP Servers</strong> no Open WebUI.</p>
+                <div class="skill-output-heading"><span>Prompt do sistema</span><button id="copyOpenWebUiPrompt" class="text-button small-button" type="button">Copiar prompt</button></div>
+                <p class="muted-text">Cole no modelo correspondente em <strong>Modelos → seu modelo → Prompt do sistema</strong>.</p>
+                <pre id="openWebUiPromptContent" class="code-block"></pre>
+              </div>
+            </section>
+          </section>
         </section>
       </main>
     </div>

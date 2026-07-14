@@ -2,11 +2,7 @@
 
 ## Documentos
 
-1. `document-ingestion` extrai texto.
-2. O conteudo e normalizado e quebrado em chunks.
-3. `documents` e `document_chunks` recebem os metadados.
-4. `embedding-worker` gera vetores.
-5. Qdrant recebe pontos em `business_documents`.
+Documentos nao passam pelo pipeline tecnico. Upload, extracao pelo Docling, chunks, embeddings, permissoes, Knowledge Bases e busca permanecem integralmente sob responsabilidade do Open WebUI.
 
 ## Codigo
 
@@ -14,7 +10,7 @@
 2. `roslyn-indexer` indexa C#.
 3. `tree-sitter-indexer` suporta linguagens futuras.
 4. `graph-builder` consolida relacoes no Neo4j.
-5. `embedding-worker` grava vetores em `code_symbols`.
+5. a Admin UI gera embeddings locais e grava vetores em `code_symbols`.
 
 ## Codigo - Versao Atual
 
@@ -27,10 +23,11 @@ Na versao atual, a Admin UI dispara uma indexacao real em background logo apos o
 5. grava chunks em `code_chunks`
 6. grava simbolos em `code_symbols`
 7. grava relacoes em `code_relationships`
-8. envia vetores para Qdrant
-9. cria grafo no Neo4j com `Workspace`, `Repository`, `CodeFile`, `CodeSymbol` e `CodeReference`
-10. resolve relacoes para arquivos, simbolos ou repositorios reais dentro do workspace
-11. cria relacoes cross-repo simples entre simbolos de mesmo nome dentro do workspace
+8. extrai candidatos a regras de negocio em `code_business_rules`
+9. envia vetores para Qdrant
+10. cria grafo no Neo4j com `Workspace`, `Repository`, `CodeFile`, `CodeSymbol` e `CodeReference`
+11. resolve relacoes para arquivos, simbolos ou repositorios reais dentro do workspace
+12. cria relacoes cross-repo simples entre simbolos de mesmo nome dentro do workspace
 
 Indexadores especificos:
 
@@ -75,8 +72,10 @@ A API de jobs acrescenta um objeto `telemetry` calculado no momento da consulta:
 - `stages`
 
 O progresso geral combina as etapas com pesos operacionais: scan (2%), analise de
-arquivos (35%), embeddings (35%), gravacao do grafo (10%), resolucao de relacoes
-(9%), sincronizacao do grafo (7%) e vinculos finais (2%). Como o custo de arquivos,
+arquivos (30%), embeddings (30%), identificacao de regras de negocio (10%),
+gravacao do grafo (10%), resolucao de relacoes (9%), sincronizacao do grafo (7%)
+e vinculos finais (2%). A etapa de regras de negocio mostra os arquivos analisados,
+o tempo acumulado e o total de regras identificadas. Como o custo de arquivos,
 embeddings e relacoes varia muito entre repositorios, o painel nao apresenta ETA.
 Em seu lugar, mostra o tempo exato decorrido desde o inicio do processamento.
 
@@ -89,6 +88,28 @@ O frontend consulta o backend a cada dois segundos e atualiza cronometro e taxas
 localmente a cada segundo entre consultas. Tempos acumulados das etapas sao
 persistidos ao final de cada arquivo para que uma atualizacao da pagina preserve a
 visibilidade de parsing, embeddings e escritas nos bancos.
+
+## Explorador do repositorio
+
+Na lista de repositorios, o nome ou o botao `Explorar` abre uma visao somente
+leitura, sempre limitada ao `repository_id` selecionado. Ela organiza as
+informacoes conhecidas em abas:
+
+- **Visao geral:** diagnostico completo e contadores agregados reais dos
+  artefatos no PostgreSQL, Qdrant e Neo4j; eles nao sao calculados a partir de
+  listas limitadas.
+- **Dados:** arquivos, simbolos e relacoes indexados no PostgreSQL.
+- **Colecoes e grafo:** pontos daquele repositorio em `code_symbols`, chunks e
+  contagem de arquivos/simbolos no Neo4j.
+- **Regras:** regra semantica, pre-condicoes, decisoes, efeitos, consequencias,
+  evidencias, origem, confianca e status automatico.
+
+A Visao geral incorpora o diagnostico de qualidade antes exibido no workspace.
+
+As listas de dados sao paginadas em blocos de 50, com navegacao por todas as
+paginas e busca textual. Em `Chunks`, a busca aceita arquivo, palavra ou frase
+do conteudo e cada resultado permite abrir o valor integral do chunk. A tela nao
+expoe console SQL/Cypher nem permite alterar dados dos indices.
 
 Quando o Admin reinicia com um job em andamento, o job volta para a fila e sua
 execucao e retomada de forma incremental. Ao reclamar esse job, o scheduler zera
@@ -161,6 +182,21 @@ Quando o indexador encontra classes, funcoes, metodos, tipos ou objetos estrutur
 
 Os simbolos gravam `parent_name` e `parent_full_name` em `code_symbols`. No Neo4j, o relacionamento `CONTAINS_SYMBOL` representa a hierarquia local quando ela e conhecida.
 
+## Regras de negocio observadas no codigo
+
+Arquivos alterados passam por um extrator deterministico sem LLM. Ele reconhece validacoes, transicoes de estado, autorizacoes, calculos de dominio, integracoes e configuracoes; quando ha evidencias no mesmo metodo/escopo, consolida uma regra composta com pre-condicoes, decisao, efeitos e consequencias. O resultado e gravado em `code_business_rules` com:
+
+- tipo e declaracao normalizada
+- evidencia literal compacta, arquivo, linhas e simbolo envolvido
+- commit usado na indexacao
+- confianca, pontuacao e justificativa calculadas por evidencias estruturais
+- representacao semantica JSON (`preconditions`, `decisions`, `effects`, `consequences`)
+- `evidence_status` automatico: `weak_evidence`, `observed`, `corroborated` ou `contradicted`
+
+Arquivos documentais e formatos de apresentacao nao entram nessa extracao. As regras descrevem implementacao observada e nunca substituem a politica documental mantida no Open WebUI. Nao existe aceite/rejeicao manual obrigatorio: o status reflete somente a forca e coerencia das evidencias de codigo. Na reindexacao incremental, regras de arquivos alterados ou removidos sao limpas junto com os demais artefatos daquele arquivo.
+
+O inventario guarda `business_rule_extractor=deterministic-semantic-v2`. Repositorios indexados por versoes anteriores reprocessam cada arquivo uma unica vez na proxima reindexacao, mesmo sem mudanca de hash; depois disso voltam ao comportamento incremental normal.
+
 ## Relatorio de Qualidade
 
 A Admin UI expoe um relatorio por repositorio com:
@@ -174,11 +210,12 @@ A Admin UI expoe um relatorio por repositorio com:
 - relacoes por tipo
 - relacoes por status de resolucao
 - relacoes resolvidas/nao resolvidas por linguagem
+- regras observadas por tipo, confianca media e status automatico de evidencia
 - ate 100 arquivos ignorados ou com erro
 
 ## Embeddings Locais
 
-O `embedding-worker` deve usar o provider local configurado em `.env`.
+A indexacao tecnica usa o provider local configurado em `.env`.
 
 Padrao:
 

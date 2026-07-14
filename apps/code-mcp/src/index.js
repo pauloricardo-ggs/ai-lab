@@ -1,5 +1,7 @@
 import http from "node:http";
+import { randomUUID } from "node:crypto";
 import pg from "pg";
+import { diversifyEvidence, reciprocalRankFusion } from "./ranking.js";
 
 const { Pool } = pg;
 
@@ -23,9 +25,11 @@ const pool = new Pool({
 
 const tools = [
   "code_search_symbol", "code_get_class", "code_get_method", "code_find_references", "code_find_callers",
-  "code_find_callees", "code_find_dependencies", "code_explain_architecture", "code_find_related_documents",
-  "code_search_code", "code_semantic_search_code", "code_analyze_impact"
+  "code_find_callees", "code_find_dependencies", "code_explain_architecture", "code_search_business_rules",
+  "code_search_code", "code_semantic_search_code", "code_analyze_impact", "code_research_flow", "code_research_continue"
 ];
+
+const researchSessionTtlMs = Math.max(60_000, Number(process.env.RESEARCH_SESSION_TTL_MS || 20 * 60_000));
 
 function sendJson(res, status, body) {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8" });
@@ -63,6 +67,29 @@ async function query(sql, params = []) {
   return pool.query(sql, params);
 }
 
+async function ensureCodeMcpSchema() {
+  await query(`CREATE TABLE IF NOT EXISTS code_business_rules (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(), workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    repository_id UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE, rule_type TEXT NOT NULL,
+    statement TEXT NOT NULL, confidence NUMERIC(4,3) NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+    confidence_reason TEXT NOT NULL, review_status TEXT NOT NULL DEFAULT 'proposed', evidence_status TEXT NOT NULL DEFAULT 'observed',
+    evidence_score NUMERIC(4,3) NOT NULL DEFAULT 0.500, evidence_count INTEGER NOT NULL DEFAULT 1, semantic JSONB NOT NULL DEFAULT '{}', file_path TEXT NOT NULL,
+    language TEXT NOT NULL, start_line INTEGER NOT NULL, end_line INTEGER, symbol_name TEXT, evidence TEXT NOT NULL,
+    indexed_commit_sha TEXT, metadata JSONB NOT NULL DEFAULT '{}', created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW(), UNIQUE(repository_id, file_path, start_line, rule_type)
+  )`);
+  await query("ALTER TABLE code_business_rules ADD COLUMN IF NOT EXISTS evidence_status TEXT NOT NULL DEFAULT 'observed'");
+  await query("ALTER TABLE code_business_rules ADD COLUMN IF NOT EXISTS evidence_score NUMERIC(4,3) NOT NULL DEFAULT 0.500");
+  await query("ALTER TABLE code_business_rules ADD COLUMN IF NOT EXISTS evidence_count INTEGER NOT NULL DEFAULT 1");
+  await query("ALTER TABLE code_business_rules ADD COLUMN IF NOT EXISTS semantic JSONB NOT NULL DEFAULT '{}'");
+  await query(`CREATE TABLE IF NOT EXISTS code_research_sessions (
+    id UUID PRIMARY KEY, workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    repository_id UUID REFERENCES repositories(id) ON DELETE CASCADE, session JSONB NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )`);
+  await query("CREATE INDEX IF NOT EXISTS idx_code_research_sessions_expires ON code_research_sessions(expires_at)");
+}
+
 async function resolveWorkspace(payload) {
   const result = await query(
     "SELECT id, slug, name FROM workspaces WHERE id::text = $1 OR slug = $1",
@@ -89,6 +116,18 @@ async function executeTool(tool, payload) {
     return searchSymbols(tool, workspace, payload);
   }
 
+  if (tool === "code_research_flow") {
+    return researchFlow(workspace, payload);
+  }
+
+  if (tool === "code_research_continue") {
+    return continueResearch(workspace, payload);
+  }
+
+  if (tool === "code_search_business_rules") {
+    return searchBusinessRules(workspace, payload);
+  }
+
   if (tool === "code_find_references") {
     return searchRelationships(tool, workspace, payload, ["REFERENCES", "IMPORTS", "DEPENDS_ON", "CALLS"]);
   }
@@ -113,16 +152,9 @@ async function executeTool(tool, payload) {
     return analyzeImpact(workspace, payload);
   }
 
-  return {
-    status: "ok",
-    tool,
-    workspace: workspace.slug,
-    repository_id: payload.repository_id || null,
-    result: null,
-    matches: [],
-    relationships: [],
-    note: "Consulta real ainda limitada a chunks e simbolos indexados. Use code_search_code, code_semantic_search_code ou code_search_symbol."
-  };
+  const error = new Error("tool_not_implemented");
+  error.status = 501;
+  throw error;
 }
 
 async function explainArchitecture(workspace, payload) {
@@ -276,7 +308,7 @@ async function searchRelationships(tool, workspace, payload, relationshipTypes, 
 
 async function searchCode(tool, workspace, payload) {
   const text = String(payload.query || "").trim();
-  const limit = Math.min(Number(payload.limit || 8), 25);
+  const limit = Math.min(Number(payload.limit || 8), 50);
 
   if (!text) {
     const error = new Error("query_required");
@@ -284,13 +316,26 @@ async function searchCode(tool, workspace, payload) {
     throw error;
   }
 
+  const terms = extractSearchTerms(text);
   let matches = [];
-  try {
-    const embedding = await createEmbedding(buildCodeSearchQuery(text));
-    const points = await searchQdrant(embedding, workspace.id, payload.repository_id, limit);
-    matches = await hydrateQdrantMatches(points);
-  } catch (error) {
-    matches = await searchChunksByText(workspace.id, payload.repository_id, text, limit);
+  let strategy = tool === "code_semantic_search_code" ? "semantic" : "lexical";
+  let fallbackUsed = false;
+
+  if (tool === "code_semantic_search_code") {
+    try {
+      const embedding = await createEmbedding(buildCodeSearchQuery(text));
+      const points = await searchQdrant(embedding, workspace.id, payload.repository_id, limit);
+      matches = await hydrateQdrantMatches(points);
+    } catch {
+      strategy = "semantic_unavailable_lexical_fallback";
+    }
+    if (!matches.length) {
+      fallbackUsed = true;
+      if (strategy === "semantic") strategy = "semantic_empty_lexical_fallback";
+      matches = await searchChunksByTerms(workspace.id, payload.repository_id, text, terms, limit);
+    }
+  } else {
+    matches = await searchChunksByTerms(workspace.id, payload.repository_id, text, terms, limit);
   }
 
   return {
@@ -299,7 +344,11 @@ async function searchCode(tool, workspace, payload) {
     workspace: workspace.slug,
     repository_id: payload.repository_id || null,
     query: text,
-    matches
+    search_strategy: strategy,
+    search_terms: terms,
+    fallback_used: fallbackUsed,
+    matches,
+    coverage: await workspaceCoverage(workspace.id, payload.repository_id)
   };
 }
 
@@ -319,11 +368,18 @@ async function searchSymbols(tool, workspace, payload) {
       ? ["method", "function"]
       : null;
 
-  const params = [workspace.id, `%${search}%`];
+  const extractedCandidates = extractSymbolCandidates(search);
+  const candidates = extractedCandidates.length ? extractedCandidates : [search];
+  const params = [workspace.id];
+  const candidateFilters = candidates.map((candidate) => {
+    params.push(`%${candidate}%`);
+    const parameter = `$${params.length}`;
+    return `(name ILIKE ${parameter} OR full_name ILIKE ${parameter})`;
+  });
   let typeSql = "";
   if (typeFilter) {
     params.push(typeFilter);
-    typeSql = "AND symbol_type = ANY($3)";
+    typeSql = `AND symbol_type = ANY($${params.length})`;
   }
   if (payload.repository_id) {
     params.push(payload.repository_id);
@@ -334,10 +390,9 @@ async function searchSymbols(tool, workspace, payload) {
   const result = await query(
     `SELECT id, repository_id, symbol_type, name, full_name, language, file_path, start_line, end_line, metadata
      FROM code_symbols
-     WHERE workspace_id = $1 AND (name ILIKE $2 OR full_name ILIKE $2)
+     WHERE workspace_id = $1 AND (${candidateFilters.join(" OR ")})
      ${typeSql}
      ORDER BY
-       CASE WHEN lower(name) = lower($2) THEN 0 ELSE 1 END,
        name ASC
      LIMIT $${params.length}`,
     params
@@ -349,7 +404,271 @@ async function searchSymbols(tool, workspace, payload) {
     workspace: workspace.slug,
     repository_id: payload.repository_id || null,
     query: search,
-    matches: result.rows
+    query_interpretation: extractedCandidates.length === 1 && extractedCandidates[0].toLocaleLowerCase() === search.toLocaleLowerCase()
+      ? "identifier"
+      : "natural_language_or_multiple_terms",
+    symbol_candidates: candidates,
+    recommended_tool: candidates.length > 1 ? "code_search_code" : null,
+    matches: result.rows,
+    coverage: await workspaceCoverage(workspace.id, payload.repository_id)
+  };
+}
+
+const commonSearchTerms = new Set([
+  "a", "ao", "aos", "as", "de", "da", "das", "do", "dos", "e", "em", "na", "nas", "no", "nos", "o", "os", "ou", "para", "por", "que", "um", "uma",
+  "como", "qual", "quais", "sobre", "com", "sem", "the", "and", "for", "from", "with", "this", "that"
+]);
+
+function extractSearchTerms(value) {
+  const tokens = String(value || "")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .split(/[^\p{L}\p{N}_-]+/u)
+    .map((term) => term.trim())
+    .filter((term) => term.length >= 3 && !commonSearchTerms.has(term.toLocaleLowerCase("pt-BR")));
+  return [...new Set(tokens)].slice(0, 12);
+}
+
+function extractSymbolCandidates(value) {
+  const raw = String(value || "").trim();
+  const identifiers = raw.match(/[A-Za-z_][A-Za-z0-9_.-]*/g) || [];
+  const candidates = identifiers
+    .filter((item) => item.length >= 3 && !commonSearchTerms.has(item.toLocaleLowerCase("pt-BR")))
+    .flatMap((item) => [item, ...item.split(/(?=[A-Z])/).filter((part) => part.length >= 3)])
+    .filter(Boolean);
+  return [...new Set(candidates)].slice(0, 10);
+}
+
+async function workspaceCoverage(workspaceId, repositoryId) {
+  const params = repositoryId ? [workspaceId, repositoryId] : [workspaceId];
+  const repositorySql = repositoryId ? "AND repository_id = $2" : "";
+  const result = await query(
+    `SELECT
+       COUNT(DISTINCT repository_id)::int AS repositories,
+       COUNT(*) FILTER (WHERE status = 'indexed')::int AS indexed_files
+     FROM code_index_files
+     WHERE workspace_id = $1 ${repositorySql}`,
+    params
+  );
+  return result.rows[0] || { repositories: 0, indexed_files: 0 };
+}
+
+async function searchBusinessRules(workspace, payload) {
+  const text = String(payload.query || "").trim();
+  if (!text) { const error = new Error("query_required"); error.status = 400; throw error; }
+  const terms = extractSearchTerms(text);
+  const usableTerms = terms.length ? terms : [text];
+  const params = [workspace.id, Math.max(0, Math.min(1, Number(payload.minimum_confidence ?? 0.5)))];
+  const filters = ["workspace_id = $1", "confidence >= $2"];
+  const scoreParts = [];
+  const matches = [];
+  for (const term of usableTerms) {
+    params.push(`%${term}%`);
+    const position = `$${params.length}`;
+    matches.push(`statement ILIKE ${position} OR evidence ILIKE ${position} OR COALESCE(symbol_name, '') ILIKE ${position} OR file_path ILIKE ${position}`);
+    scoreParts.push(`CASE WHEN statement ILIKE ${position} THEN 5 ELSE 0 END + CASE WHEN COALESCE(symbol_name, '') ILIKE ${position} THEN 4 ELSE 0 END + CASE WHEN evidence ILIKE ${position} THEN 2 ELSE 0 END + CASE WHEN file_path ILIKE ${position} THEN 3 ELSE 0 END`);
+  }
+  filters.push(`(${matches.map((match) => `(${match})`).join(" OR ")})`);
+  if (payload.repository_id) { params.push(payload.repository_id); filters.push(`repository_id = $${params.length}`); }
+  if (payload.rule_type) { params.push(payload.rule_type); filters.push(`rule_type = $${params.length}`); }
+  params.push(Math.min(Math.max(Number(payload.limit || 20), 1), 50));
+  const result = await query(
+    `SELECT id, repository_id, rule_type, statement, confidence::float, confidence_reason, review_status,
+            evidence_status, evidence_score::float, evidence_count, semantic,
+            file_path, language, start_line, end_line, symbol_name, evidence, indexed_commit_sha, metadata,
+            (${scoreParts.join(" + ")})::int AS lexical_score
+     FROM code_business_rules WHERE ${filters.join(" AND ")}
+     ORDER BY lexical_score DESC, confidence DESC, file_path, start_line LIMIT $${params.length}`,
+    params
+  );
+  return {
+    status: "ok", tool: "code_search_business_rules", workspace: workspace.slug,
+    repository_id: payload.repository_id || null, query: text, search_terms: usableTerms,
+    matches: result.rows,
+    caveat: "Regras extraidas deterministicamente representam comportamento observado no codigo. Use evidence_status, pontuacao e evidencias semanticas para avaliar a forca do achado. Documentos permanecem sob responsabilidade do Open WebUI."
+  };
+}
+
+async function researchFlow(workspace, payload) {
+  const question = String(payload.question || payload.query || "").trim();
+  const candidateLimit = Math.min(Math.max(Number(payload.candidate_limit || 30), 10), 50);
+  const evidenceLimit = Math.min(Math.max(Number(payload.evidence_limit || payload.limit || 10), 3), 15);
+  if (!question) {
+    const error = new Error("question_required");
+    error.status = 400;
+    throw error;
+  }
+
+  const terms = extractSearchTerms(question);
+  const sharedPayload = { ...payload, query: question, limit: candidateLimit };
+  const [semantic, lexical, symbolResearch, businessRules, coverage] = await Promise.all([
+    searchCode("code_semantic_search_code", workspace, sharedPayload),
+    searchCode("code_search_code", workspace, sharedPayload),
+    searchSymbols("code_search_symbol", workspace, sharedPayload),
+    searchBusinessRules(workspace, { ...sharedPayload, minimum_confidence: 0.5 }).catch(() => ({ matches: [] })),
+    workspaceCoverage(workspace.id, payload.repository_id)
+  ]);
+
+  const symbols = symbolResearch.matches.slice(0, 10);
+  const relationshipResults = await Promise.all(symbols.map((symbol) =>
+    searchRelationships("code_find_references", workspace, { ...payload, symbol: symbol.name, limit: 10 }, ["REFERENCES", "IMPORTS", "DEPENDS_ON", "CALLS"])
+  ));
+  const relationships = deduplicateRelationships(relationshipResults.flatMap((result) => result.relationships));
+  const candidates = mergeResearchCandidates(semantic.matches, lexical.matches, terms);
+  const session = await createResearchSession({ workspace, repositoryId: payload.repository_id || null, question, terms, coverage, candidates, symbols, relationships, businessRules: businessRules.matches });
+  return buildResearchResponse(session, { tool: "code_research_flow", evidenceLimit });
+}
+
+async function continueResearch(workspace, payload) {
+  const researchId = String(payload.research_id || "").trim();
+  const session = await getResearchSession(researchId);
+  if (!session || session.workspaceId !== workspace.id || session.repositoryId !== (payload.repository_id || null)) {
+    const error = new Error("research_not_found_or_expired");
+    error.status = 404;
+    throw error;
+  }
+
+  const focus = String(payload.focus || payload.query || "").trim();
+  const evidenceLimit = Math.min(Math.max(Number(payload.evidence_limit || payload.limit || 10), 3), 15);
+  if (focus) {
+    const candidateLimit = Math.min(Math.max(Number(payload.candidate_limit || 25), 10), 50);
+    const focusPayload = { ...payload, query: focus, limit: candidateLimit, repository_id: session.repositoryId || undefined };
+    const [semantic, lexical, symbols, businessRules] = await Promise.all([
+      searchCode("code_semantic_search_code", workspace, focusPayload),
+      searchCode("code_search_code", workspace, focusPayload),
+      searchSymbols("code_search_symbol", workspace, focusPayload),
+      searchBusinessRules(workspace, focusPayload).catch(() => ({ matches: [] }))
+    ]);
+    session.focuses.push(focus);
+    session.terms = [...new Set([...session.terms, ...extractSearchTerms(focus)])];
+    session.candidates = mergeResearchCandidates([...session.candidates.map((candidate) => candidate.raw), ...semantic.matches], lexical.matches, [...session.terms, ...extractSearchTerms(focus)]);
+    session.symbols = deduplicateSymbols([...session.symbols, ...symbols.matches]).slice(0, 20);
+    session.businessRules = [...new Map([...(session.businessRules || []), ...businessRules.matches].map((rule) => [rule.id, rule])).values()].slice(0, 30);
+  }
+
+  const focusTerms = extractSearchTerms(focus);
+  const symbolsToExpand = selectSymbolsForFocus(session.symbols, focusTerms).slice(0, 8);
+  if (symbolsToExpand.length) {
+    const resultSets = await Promise.all(symbolsToExpand.map((symbol) =>
+      searchRelationships("code_find_references", workspace, { repository_id: session.repositoryId || undefined, symbol: symbol.name, limit: 15 }, ["REFERENCES", "IMPORTS", "DEPENDS_ON", "CALLS"])
+    ));
+    session.relationships = deduplicateRelationships([...session.relationships, ...resultSets.flatMap((result) => result.relationships)]);
+  }
+  session.updatedAt = Date.now();
+  await saveResearchSession(session);
+  return buildResearchResponse(session, { tool: "code_research_continue", evidenceLimit, focus });
+}
+
+async function createResearchSession({ workspace, repositoryId, question, terms, coverage, candidates, symbols, relationships, businessRules = [] }) {
+  const session = {
+    id: randomUUID(), workspaceId: workspace.id, workspaceSlug: workspace.slug, repositoryId, question, terms, coverage,
+    candidates, symbols: deduplicateSymbols(symbols), relationships, businessRules, focuses: [], createdAt: Date.now(), updatedAt: Date.now()
+  };
+  await saveResearchSession(session);
+  return session;
+}
+
+function serializeResearchSession(session) {
+  return {
+    ...session,
+    candidates: session.candidates.map((candidate) => ({ ...candidate, sources: [...candidate.sources] }))
+  };
+}
+
+function hydrateResearchSession(session) {
+  return {
+    ...session,
+    candidates: (session.candidates || []).map((candidate) => ({ ...candidate, sources: new Set(candidate.sources || []) })),
+    businessRules: session.businessRules || []
+  };
+}
+
+async function saveResearchSession(session) {
+  const expiresAt = new Date(Date.now() + researchSessionTtlMs);
+  await query(
+    `INSERT INTO code_research_sessions (id, workspace_id, repository_id, session, expires_at)
+     VALUES ($1,$2,$3,$4::jsonb,$5)
+     ON CONFLICT (id) DO UPDATE SET session = EXCLUDED.session, expires_at = EXCLUDED.expires_at, updated_at = NOW()`,
+    [session.id, session.workspaceId, session.repositoryId, JSON.stringify(serializeResearchSession(session)), expiresAt]
+  );
+}
+
+async function getResearchSession(id) {
+  if (!id) return null;
+  await query("DELETE FROM code_research_sessions WHERE expires_at <= NOW()");
+  const result = await query("SELECT session FROM code_research_sessions WHERE id = $1 AND expires_at > NOW()", [id]);
+  return result.rows[0] ? hydrateResearchSession(result.rows[0].session) : null;
+}
+
+function mergeResearchCandidates(semanticMatches, lexicalMatches, terms) {
+  return reciprocalRankFusion({ semantic: semanticMatches, lexical: lexicalMatches }, terms);
+}
+
+function selectResearchEvidence(candidates, limit) {
+  return diversifyEvidence(candidates, limit).map(compactEvidence);
+}
+
+function compactEvidence(candidate) {
+  const match = candidate.raw;
+  return {
+    id: evidenceId(match), repository_id: match.repository_id, file_path: match.file_path, language: match.language,
+    start_line: match.start_line, end_line: match.end_line, sources: [...candidate.sources], score: Number(candidate.score.toFixed(6)), ranks: candidate.ranks || {},
+    matched_terms: candidate.termCoverage,
+    excerpt: String(match.content || "").slice(0, 1200)
+  };
+}
+
+function evidenceId(match) {
+  return `${match.repository_id}:${match.file_path}:${match.chunk_index}`;
+}
+
+function deduplicateSymbols(symbols) {
+  return [...new Map(symbols.map((symbol) => [symbol.id, symbol])).values()];
+}
+
+function deduplicateRelationships(relationships) {
+  return [...new Map(relationships.map((relationship) => [relationship.id, relationship])).values()];
+}
+
+function selectSymbolsForFocus(symbols, terms) {
+  if (!terms.length) return symbols;
+  const filtered = symbols.filter((symbol) => {
+    const value = `${symbol.name} ${symbol.full_name} ${symbol.file_path}`.toLocaleLowerCase("pt-BR");
+    return terms.some((term) => value.includes(term.toLocaleLowerCase("pt-BR")));
+  });
+  return filtered.length ? filtered : symbols;
+}
+
+function buildResearchResponse(session, { tool, evidenceLimit, focus = null }) {
+  const evidence = selectResearchEvidence(session.candidates, evidenceLimit);
+  const symbols = session.symbols.slice(0, 12).map((symbol) => ({
+    id: symbol.id, repository_id: symbol.repository_id, symbol_type: symbol.symbol_type, name: symbol.name,
+    full_name: symbol.full_name, file_path: symbol.file_path, start_line: symbol.start_line
+  }));
+  const relationships = session.relationships.slice(0, 30).map((relationship) => ({
+    relationship_type: relationship.relationship_type, source_name: relationship.source_name, target_name: relationship.target_name,
+    source_file_path: relationship.source_file_path, target_file_path: relationship.target_file_path,
+    target_repository_name: relationship.target_repository_name, start_line: relationship.start_line
+  }));
+  const businessRules = (session.businessRules || []).slice(0, 15).map((rule) => ({
+    id: rule.id, repository_id: rule.repository_id, rule_type: rule.rule_type, statement: rule.statement,
+    confidence: rule.confidence, confidence_reason: rule.confidence_reason, review_status: rule.review_status,
+    evidence_status: rule.evidence_status, evidence_score: rule.evidence_score, evidence_count: rule.evidence_count, semantic: rule.semantic,
+    file_path: rule.file_path, start_line: rule.start_line, end_line: rule.end_line,
+    symbol_name: rule.symbol_name, evidence: rule.evidence, indexed_commit_sha: rule.indexed_commit_sha
+  }));
+  const nextSteps = [];
+  if (!evidence.length) nextSteps.push("Nenhuma evidência foi retornada; aprofunde com uma sigla, status, endpoint, evento ou serviço específico.");
+  if (symbols.length && !relationships.length) nextSteps.push("Há símbolos, mas não há relações indexadas. Use a continuação com o nome de um símbolo, serviço ou integração encontrada.");
+  if (!session.coverage.indexed_files) nextSteps.push("O workspace não possui arquivos indexados disponíveis para esta consulta.");
+  return {
+    status: "ok", tool, workspace: session.workspaceSlug, repository_id: session.repositoryId,
+    research: {
+      research_id: session.id, question: session.question, focus, normalized_terms: session.terms,
+      coverage: session.coverage, candidate_count: session.candidates.length, evidence_count: evidence.length,
+      session_expires_in_seconds: Math.floor(researchSessionTtlMs / 1000), next_cursor: { research_id: session.id }
+    },
+    evidence, business_rules: businessRules, symbols, relationships, next_steps: nextSteps,
+    provenance: { documents_included: false, document_system: "open-webui", ranking: "reciprocal_rank_fusion" }
   };
 }
 
@@ -441,26 +760,37 @@ async function hydrateQdrantMatches(points) {
     .filter(Boolean);
 }
 
-async function searchChunksByText(workspaceId, repositoryId, text, limit) {
-  const params = [workspaceId, `%${text}%`];
-  let repoSql = "";
+async function searchChunksByTerms(workspaceId, repositoryId, text, terms, limit) {
+  const usableTerms = terms.length ? terms : [text];
+  const params = [workspaceId];
+  const scoreParts = [];
+  const matchParts = [];
+  for (const term of usableTerms) {
+    params.push(`%${term}%`);
+    const parameter = `$${params.length}`;
+    scoreParts.push(`CASE WHEN content ILIKE ${parameter} THEN 3 ELSE 0 END`);
+    scoreParts.push(`CASE WHEN file_path ILIKE ${parameter} THEN 6 ELSE 0 END`);
+    matchParts.push(`content ILIKE ${parameter} OR file_path ILIKE ${parameter}`);
+  }
+  let repositorySql = "";
   if (repositoryId) {
     params.push(repositoryId);
-    repoSql = `AND repository_id = $${params.length}`;
+    repositorySql = `AND repository_id = $${params.length}`;
   }
   params.push(limit);
 
   const result = await query(
-    `SELECT id, repository_id, file_path, language, chunk_index, start_line, end_line, content, metadata
+    `SELECT id, repository_id, file_path, language, chunk_index, start_line, end_line, content, metadata,
+            (${scoreParts.join(" + ")})::int AS lexical_score
      FROM code_chunks
-     WHERE workspace_id = $1 AND content ILIKE $2
-     ${repoSql}
-     ORDER BY file_path ASC, chunk_index ASC
+     WHERE workspace_id = $1 AND (${matchParts.map((part) => `(${part})`).join(" OR ")})
+     ${repositorySql}
+     ORDER BY lexical_score DESC, file_path ASC, chunk_index ASC
      LIMIT $${params.length}`,
     params
   );
 
-  return result.rows.map((row) => ({ score: null, ...row }));
+  return result.rows.map((row) => ({ score: row.lexical_score, ...row }));
 }
 
 function qdrantHeaders() {
@@ -503,6 +833,7 @@ async function handleRequest(req, res) {
   sendJson(res, 200, await executeTool(tool, payload));
 }
 
+await ensureCodeMcpSchema();
 http.createServer((req, res) => {
   handleRequest(req, res).catch((error) => {
     const message = error instanceof Error ? error.message : "internal_error";

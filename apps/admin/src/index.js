@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
+import { extractBusinessRules } from "./business-rules.js";
 
 const { Pool } = pg;
 
@@ -28,7 +29,10 @@ const roslynIndexerUrl = process.env.ROSLYN_INDEXER_URL || "";
 const codeCollection = "code_symbols";
 const mcpToolNames = [
   "code_search_symbol", "code_get_class", "code_get_method", "code_find_references", "code_find_callers", "code_find_callees",
-  "code_find_dependencies", "code_search_code", "code_semantic_search_code"
+  "code_find_dependencies", "code_search_code", "code_semantic_search_code", "code_explain_architecture", "code_analyze_impact",
+  "code_search_business_rules", "code_research_flow", "code_research_continue",
+  "git_get_commit", "git_get_history", "git_get_diff", "git_get_branch", "git_list_changed_files",
+  "git_find_commits_touching_symbol", "git_search_commit_message"
 ].sort();
 
 const ignoredDirectories = new Set([
@@ -448,6 +452,173 @@ async function mcpGatewayInfo(req) {
   return { base_url: baseUrl, gateway_api_key_configured: Boolean(gatewayApiKey), tools: mcpToolNames };
 }
 
+function skillSlug(value) {
+  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "mcp-gateway";
+}
+
+async function createMcpSkill(req, body = {}) {
+  const requestedSlugs = [...new Set((Array.isArray(body.workspace_slugs) ? body.workspace_slugs : [])
+    .map((slug) => String(slug || "").trim()).filter(Boolean))];
+  if (!requestedSlugs.length) {
+    const error = new Error("select_at_least_one_workspace");
+    error.status = 400;
+    throw error;
+  }
+
+  const result = await query(
+    `SELECT w.name AS workspace_name, w.slug AS workspace_slug, r.name AS repository_name, r.url AS repository_url
+     FROM workspaces w
+     LEFT JOIN repositories r ON r.workspace_id = w.id
+     WHERE w.slug = ANY($1::text[])
+     ORDER BY w.name, r.name`,
+    [requestedSlugs]
+  );
+  const grouped = new Map(requestedSlugs.map((slug) => [slug, { slug, name: slug, repositories: [] }]));
+  const foundSlugs = new Set();
+  for (const row of result.rows) {
+    const workspace = grouped.get(row.workspace_slug);
+    if (!workspace) continue;
+    foundSlugs.add(row.workspace_slug);
+    workspace.name = row.workspace_name;
+    if (row.repository_name) workspace.repositories.push({ name: row.repository_name, url: row.repository_url || "" });
+  }
+  const workspaces = [...grouped.values()];
+  const missing = requestedSlugs.filter((slug) => !foundSlugs.has(slug));
+  if (missing.length) {
+    const error = new Error(`workspace_not_found: ${missing.join(", ")}`);
+    error.status = 404;
+    throw error;
+  }
+
+  const baseUrl = (await mcpGatewayInfo(req)).base_url;
+  const name = `company-mcp-${skillSlug(workspaces.map((workspace) => workspace.slug).join("-"))}`.slice(0, 80);
+  const routing = workspaces.map((workspace) => {
+    const repos = workspace.repositories.length
+      ? workspace.repositories.map((repo) => `  - \`${repo.name}\`${repo.url ? ` (remote: ${repo.url})` : ""}`).join("\n")
+      : "  - Nenhum repositório cadastrado; use este workspace somente quando ele for informado explicitamente.";
+    return `- Workspace: **${workspace.name}**\n  - \`workspace_slug\`: \`${workspace.slug}\`\n  - Repositórios: \n${repos}`;
+  }).join("\n");
+
+  const content = `---
+name: ${name}
+description: Use o MCP Gateway corporativo ao investigar, alterar ou responder sobre código dos repositórios mapeados abaixo. Para perguntas de fluxo, integração, cancelamento ou regra de negócio, execute a investigação aprofundada obrigatória antes de responder. Escolha o workspace pelo repositório atual e envie workspace_slug em toda tool call.
+---
+
+# MCP Gateway corporativo
+
+Use esta skill sempre que a tarefa envolver código, histórico Git, arquitetura, impacto ou símbolos dos repositórios listados em **Roteamento por repositório**. Ela complementa a leitura local: consulte o MCP antes de assumir relações entre módulos, dependências ou histórico.
+
+## Configuração do servidor
+
+O cliente MCP deve estar configurado uma única vez com Streamable HTTP:
+
+\`\`\`toml
+[mcp_servers.company]
+url = "${baseUrl}"
+headers = { "Authorization" = "Bearer <GATEWAY_API_KEY>" }
+\`\`\`
+
+Nunca grave \`GATEWAY_API_KEY\` nesta skill, no repositório ou em logs. Use o mecanismo de segredo/configuração do cliente.
+
+## Roteamento por repositório
+
+Identifique o repositório atual pelo diretório Git e, se houver ambiguidade, por \`git remote -v\`. Use exatamente o \`workspace_slug\` correspondente:
+
+${routing}
+
+Se o repositório atual não estiver mapeado, não escolha um workspace por aproximação: peça ao usuário o workspace correto ou indique que ele precisa ser incluído nesta skill.
+
+## Protocolo obrigatório para fluxos e regras de negócio
+
+Para perguntas como “como funciona”, “qual é o fluxo”, cancelamento, aprovação, integração, evento ou mudança de status, não responda após uma única busca. Execute esta sequência antes de sintetizar, salvo se o usuário pedir explicitamente uma resposta breve:
+
+1. **Descoberta ampla:** comece com \`code_research_flow\` enviando a pergunta completa no campo \`question\`; ela combina busca semântica, textual por termos, regras extraídas, símbolos e relações com RRF. Se não houver evidência, faça buscas textuais separadas com o termo de negócio, suas siglas, estados e sinônimos. Exemplo: \`BCOR\`, \`cancelamento\`, \`CanceladoSistema\`, \`CanceladoManual\` e \`Contrato\` são buscas separadas.
+2. **Aprofundamento dirigido:** se houver \`research.next_cursor.research_id\` e lacunas, use \`code_research_continue\` com esse ID e um \`focus\` específico, em vez de repetir a pesquisa ampla.
+3. **Ancoragem no domínio:** use \`code_search_symbol\` e \`code_get_class\`/\`code_get_method\` para abrir enums, handlers, services, endpoints, consumers, jobs e contratos de integração relacionados. Não use apenas a primeira ocorrência encontrada.
+4. **Rastreamento de ponta a ponta:** para cada operação ou estado relevante, consulte \`code_find_references\`, \`code_find_callers\`, \`code_find_callees\` e \`code_find_dependencies\`. Continue pelo menos até identificar: gatilho, comando/endpoint ou consumer, regra de decisão, persistência ou chamada externa e efeito posterior.
+5. **Integrações e fronteiras:** procure explicitamente por gRPC, HTTP, filas, eventos, consumers, producers, schedulers e clients que envolvam o domínio. Se a transição de estado não estiver no repositório atual, pesquise todos os repositórios do workspace antes de concluir que ela “não existe”.
+6. **Histórico quando útil:** use \`git_search_commit_message\`, \`git_find_commits_touching_symbol\` e \`git_get_history\` para esclarecer regra ambígua, origem de uma integração ou mudança recente; não use histórico como substituto do código atual.
+7. **Checagem de suficiência:** antes de responder, confirme que cada seta do fluxo tem uma evidência no código ou marque-a como inferência/lacuna. Se o serviço responsável não estiver indexado, diga exatamente qual operação, evento ou repositório ainda precisa ser investigado.
+
+## Como consultar
+
+- Antes de mudanças não triviais, investigue símbolos, referências e dependências com \`code_search_symbol\`, \`code_find_references\`, \`code_find_callers\`, \`code_find_callees\` e \`code_find_dependencies\`.
+- Para entendimento amplo, use \`code_search_code\`, \`code_semantic_search_code\` ou \`code_explain_architecture\`. Para avaliar efeitos, use \`code_analyze_impact\`.
+- Use \`code_search_business_rules\` para localizar comportamento de negócio extraído do código; avalie \`evidence_status\`, pontuação e evidências semânticas antes de concluir.
+- Para perguntas de histórico, branch, diff ou commits, prefira as tools \`git_*\` publicadas pelo Gateway.
+- As tools \`git_*\` consultam somente clones locais. Para pull requests, issues, reviews e GitHub remoto, use um MCP GitHub dedicado; não invente tools \`github_*\` neste Gateway.
+- Toda chamada recebe \`workspace_slug\`: \`\`${"{ workspace_slug: \"<slug>\", ... }"}\`\`. Inclua \`repository_id\` somente quando ele já for conhecido e for necessário restringir a busca.
+- Trate os resultados como contexto para validar no checkout local. Informe limites ou ausência de indexação quando os resultados forem insuficientes.
+
+## Boas práticas
+
+- Não misture resultados de workspaces diferentes na mesma conclusão.
+- Em perguntas de fluxo, comece amplo e depois aprofunde; aumente \`limit\` e varie os termos se a primeira busca trouxer somente consumidores ou enums.
+- Para alterações sensíveis, combine busca semântica, referências e histórico antes de editar.
+- Diferencie na resposta final: **confirmado no código**, **inferido** e **não localizado**. Não afirme que algo não existe sem ter feito a busca transversal do workspace.
+- O Gateway exige \`workspace_slug\` ou \`workspace_id\`; nesta skill use sempre \`workspace_slug\` para tornar o escopo legível.
+- Documentos e Knowledge Bases não fazem parte deste MCP; quando forem necessários, consulte-os pelo Open WebUI e mantenha a evidência documental separada da implementação observada.
+`;
+
+  return { name, content, workspaces: workspaces.map(({ slug, name: workspaceName, repositories }) => ({ slug, name: workspaceName, repositories })) };
+}
+
+async function createOpenWebUiPrompt(req, body = {}) {
+  const selectedSlugs = [...new Set((Array.isArray(body.workspace_slugs) ? body.workspace_slugs : [])
+    .map((slug) => String(slug || "").trim()).filter(Boolean))];
+  if (selectedSlugs.length !== 1) {
+    const error = new Error("select_exactly_one_workspace_for_open_webui_prompt");
+    error.status = 400;
+    throw error;
+  }
+  const skill = await createMcpSkill(req, body);
+  const workspace = skill.workspaces[0];
+  const content = `Você é o ${workspace.name} Code, assistente técnico dos repositórios do workspace \`${workspace.slug}\`.
+
+Para toda pergunta sobre código, arquitetura, integração, regra de negócio, fluxo, status, histórico ou impacto de mudança, use o MCP antes de responder.
+
+Regras:
+- Este perfil usa o workspace \`${workspace.slug}\`. Nunca peça \`workspace_slug\` ou \`workspace_id\` ao usuário; o servidor MCP preenche o workspace automaticamente. Se precisar enviar o argumento explicitamente, use \`workspace_slug: "${workspace.slug}"\`.
+- Use apenas as tools disponíveis no contexto; nunca invente nomes de tools.
+- Não responda que uma tool não está disponível sem antes verificar as tools recebidas.
+- Se o MCP falhar ou não retornar dados, informe isso claramente e não invente uma resposta.
+- Não descreva uma busca como “semântica”, “textual” ou “por símbolo” se a tool executada for outra; o nome e o resultado da tool são a fonte de verdade.
+- Não anuncie uma próxima busca e encerre a resposta: execute-a antes de falar com o usuário.
+- Quando decidir usar uma tool, invoque-a pela interface de tools; nunca escreva uma chamada, JSON ou nome de função como texto para o usuário.
+
+Investigação:
+- Prefira \`code_search_symbol\` quando já houver um identificador conhecido (classe, método, enum ou status). A tool também decompõe consultas em linguagem natural, mas para perguntas de negócio a primeira opção é \`code_research_flow\`.
+- Para localizar código por assunto, use \`code_search_code\` e \`code_semantic_search_code\`. Faça consultas curtas e separadas quando precisar aprofundar uma evidência.
+- Para regras candidatas, use \`code_search_business_rules\` e confirme arquivo, linhas, commit, confiança, status automático e evidências semânticas antes de concluir.
+- Se uma busca não retornar resultados, execute automaticamente a próxima busca alternativa na mesma resposta. Não diga “vamos tentar”, não peça arquivo ao usuário e não conclua ausência de código após uma única chamada.
+
+Protocolo obrigatório para fluxo, integração, cancelamento ou mudança de status:
+1. Comece com \`code_research_flow\`, enviando a pergunta completa no campo \`question\` e \`limit: 10\`. Esta tool já executa busca semântica, busca textual por termos, símbolos e relações.
+2. Use as evidências retornadas para aprofundar com \`code_find_references\`, \`code_find_callers\`, \`code_find_callees\` ou \`code_find_dependencies\` nos símbolos encontrados.
+3. Se a resposta trouxer \`research.next_cursor.research_id\` e ainda houver lacunas, invoque \`code_research_continue\` automaticamente com esse \`research_id\` e um \`focus\` específico (símbolo, serviço, evento ou integração). Não mostre a chamada em texto e não repita a recuperação ampla.
+4. Procure explicitamente por endpoints, handlers, serviços, gRPC, HTTP, filas, eventos, consumers, producers e jobs. Continue até encontrar o gatilho, a regra, a integração ou persistência e o efeito.
+5. Se \`code_research_flow\` não encontrar evidências, faça ao menos duas buscas textuais separadas pelos termos, siglas, estados e sinônimos mais importantes. Exemplo: \`Banestes\`, \`BCOR\`, \`cancelamento\`, \`CanceladoSistema\` e \`CanceladoManual\` são buscas separadas.
+6. Antes de responder, execute no mínimo duas chamadas MCP úteis. Uma chamada vazia não conta como investigação concluída.
+
+Use histórico Git somente quando ele ajudar a esclarecer a regra atual ou sua origem.
+As tools \`git_*\` operam no clone local. Pull requests, issues e reviews exigem MCP GitHub dedicado. Documentos permanecem exclusivamente no Open WebUI.
+
+Resposta:
+- Baseie conclusões nos resultados do MCP.
+- Diferencie explicitamente: **confirmado no código**, **inferido** e **não localizado**.
+- Em perguntas de fluxo, explique o encadeamento encontrado: gatilho, entrada, regra, integração ou persistência e efeito.
+- Cite arquivos, símbolos ou operações encontrados quando disponíveis.
+- Só afirme que algo não foi localizado depois de executar o protocolo completo; informe quais termos e tipos de busca foram tentados.
+- Seja direto, mas não omita etapas relevantes.`;
+
+  const gateway = await mcpGatewayInfo(req);
+  return {
+    name: `${skillSlug(workspace.slug)}-code`, content,
+    workspace: { slug: workspace.slug, name: workspace.name },
+    mcp_url: `${gateway.base_url}?workspace_slug=${encodeURIComponent(workspace.slug)}`
+  };
+}
+
 async function query(sql, params = []) {
   const result = await pool.query(sql, params);
   return result;
@@ -502,6 +673,7 @@ async function ensureApplicationSchema() {
       total_chunks INTEGER NOT NULL DEFAULT 0,
       chunks_indexed INTEGER NOT NULL DEFAULT 0,
       symbols_indexed INTEGER NOT NULL DEFAULT 0,
+      business_rules_indexed INTEGER NOT NULL DEFAULT 0,
       priority INTEGER NOT NULL DEFAULT 100,
       queue_position INTEGER,
       requested_by TEXT,
@@ -557,6 +729,44 @@ async function ensureApplicationSchema() {
       UNIQUE(repository_id, file_path)
     )
   `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS code_business_rules (
+      id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+      workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      repository_id UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+      rule_type TEXT NOT NULL,
+      statement TEXT NOT NULL,
+      confidence NUMERIC(4,3) NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+      confidence_reason TEXT NOT NULL,
+      review_status TEXT NOT NULL DEFAULT 'proposed',
+      evidence_status TEXT NOT NULL DEFAULT 'observed',
+      evidence_score NUMERIC(4,3) NOT NULL DEFAULT 0.500 CHECK (evidence_score BETWEEN 0 AND 1),
+      evidence_count INTEGER NOT NULL DEFAULT 1,
+      semantic JSONB NOT NULL DEFAULT '{}',
+      file_path TEXT NOT NULL,
+      language TEXT NOT NULL,
+      start_line INTEGER NOT NULL,
+      end_line INTEGER,
+      symbol_name TEXT,
+      evidence TEXT NOT NULL,
+      indexed_commit_sha TEXT,
+      metadata JSONB NOT NULL DEFAULT '{}',
+      created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      UNIQUE(repository_id, file_path, start_line, rule_type)
+    )
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS code_research_sessions (
+      id UUID PRIMARY KEY,
+      workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+      repository_id UUID REFERENCES repositories(id) ON DELETE CASCADE,
+      session JSONB NOT NULL,
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS scope TEXT NOT NULL DEFAULT 'workspace'");
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS phase TEXT");
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS current_repository TEXT");
@@ -568,6 +778,12 @@ async function ensureApplicationSchema() {
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS total_chunks INTEGER NOT NULL DEFAULT 0");
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS chunks_indexed INTEGER NOT NULL DEFAULT 0");
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS symbols_indexed INTEGER NOT NULL DEFAULT 0");
+  await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS business_rules_indexed INTEGER NOT NULL DEFAULT 0");
+  await query("ALTER TABLE code_business_rules ADD COLUMN IF NOT EXISTS evidence_status TEXT NOT NULL DEFAULT 'observed'");
+  await query("ALTER TABLE code_business_rules ADD COLUMN IF NOT EXISTS evidence_score NUMERIC(4,3) NOT NULL DEFAULT 0.500");
+  await query("ALTER TABLE code_business_rules ADD COLUMN IF NOT EXISTS evidence_count INTEGER NOT NULL DEFAULT 1");
+  await query("ALTER TABLE code_business_rules ADD COLUMN IF NOT EXISTS semantic JSONB NOT NULL DEFAULT '{}'");
+  await query("UPDATE code_business_rules SET evidence_score = confidence WHERE evidence_score = 0.500 AND confidence <> 0.500");
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS started_at TIMESTAMP");
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS finished_at TIMESTAMP");
   await query("ALTER TABLE code_index_jobs ADD COLUMN IF NOT EXISTS error TEXT");
@@ -608,6 +824,11 @@ async function ensureApplicationSchema() {
   await query("CREATE INDEX IF NOT EXISTS idx_code_index_jobs_repository_id ON code_index_jobs(repository_id)");
   await query("CREATE INDEX IF NOT EXISTS idx_code_index_jobs_workspace_id ON code_index_jobs(workspace_id)");
   await query("CREATE INDEX IF NOT EXISTS idx_code_index_jobs_queue ON code_index_jobs(status, priority, queue_position, created_at)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_business_rules_workspace ON code_business_rules(workspace_id, confidence DESC)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_business_rules_repository ON code_business_rules(repository_id, file_path)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_business_rules_type ON code_business_rules(rule_type)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_business_rules_evidence_status ON code_business_rules(evidence_status, evidence_score DESC)");
+  await query("CREATE INDEX IF NOT EXISTS idx_code_research_sessions_expires ON code_research_sessions(expires_at)");
   await query("UPDATE code_index_jobs SET status = 'queued', phase = 'queued', locked_at = NULL, worker_id = NULL WHERE status IN ('pending', 'running', 'canceling')");
 }
 
@@ -828,6 +1049,18 @@ async function getRepositoryIndexReport(workspaceIdOrSlug, repositoryId) {
      ORDER BY total DESC, language ASC`,
     [repository.id]
   );
+  const businessRulesByType = await query(
+    `SELECT rule_type AS type, COUNT(*)::int AS count, ROUND(AVG(confidence), 3)::float AS average_confidence
+     FROM code_business_rules WHERE repository_id = $1
+     GROUP BY rule_type ORDER BY count DESC, rule_type`,
+    [repository.id]
+  );
+  const businessRulesByReview = await query(
+    `SELECT evidence_status AS status, COUNT(*)::int AS count
+     FROM code_business_rules WHERE repository_id = $1
+     GROUP BY evidence_status ORDER BY count DESC, evidence_status`,
+    [repository.id]
+  );
   const fileIssues = await query(
     `SELECT file_path, language, status, skipped_reason, error, metadata, updated_at
      FROM code_index_files
@@ -838,7 +1071,7 @@ async function getRepositoryIndexReport(workspaceIdOrSlug, repositoryId) {
   );
   const latestJob = await query(
     `SELECT id, status, phase, total_files, files_indexed, total_repository_files,
-            skipped_files, total_chunks, chunks_indexed, symbols_indexed,
+            skipped_files, total_chunks, chunks_indexed, symbols_indexed, business_rules_indexed,
             started_at, finished_at, error, metrics, created_at
      FROM code_index_jobs
      WHERE repository_id = $1
@@ -858,8 +1091,103 @@ async function getRepositoryIndexReport(workspaceIdOrSlug, repositoryId) {
     relationships_by_type: relationshipsByType.rows,
     relationships_by_resolution: relationshipsByResolution.rows,
     relationships_by_language: relationshipsByLanguage.rows,
+    business_rules_by_type: businessRulesByType.rows,
+    business_rules_by_review: businessRulesByReview.rows,
     file_issues: fileIssues.rows,
     latest_job: latestJob.rows[0] ? enrichIndexJobTelemetry(latestJob.rows[0]) : null
+  };
+}
+
+async function repositoryQdrantSummary(repositoryId) {
+  try {
+    const response = await fetch(`${qdrantUrl}/collections/${codeCollection}/points/count`, {
+      method: "POST",
+      headers: qdrantHeaders(),
+      body: JSON.stringify({ exact: true, filter: { must: [{ key: "repository_id", match: { value: repositoryId } }] } }),
+      signal: AbortSignal.timeout(neo4jTimeoutMs)
+    });
+    if (!response.ok) throw new Error(`qdrant_request_failed_${response.status}`);
+    const body = await response.json();
+    return { available: true, collection: codeCollection, points: Number(body.result?.count || 0) };
+  } catch (error) {
+    return { available: false, collection: codeCollection, points: null, error: error.message };
+  }
+}
+
+async function repositoryGraphSummary(repositoryId) {
+  try {
+    const rows = await queryNeo4j(`
+      MATCH (repo:Repository {id: $repositoryId})
+      OPTIONAL MATCH (repo)-[:CONTAINS]->(file:CodeFile)
+      OPTIONAL MATCH (file)-[:DECLARES]->(symbol:CodeSymbol)
+      RETURN count(DISTINCT file), count(DISTINCT symbol)
+    `, { repositoryId });
+    const [files = 0, symbols = 0] = rows[0] || [];
+    return { available: true, files: Number(files || 0), symbols: Number(symbols || 0) };
+  } catch (error) {
+    return { available: false, files: null, symbols: null, error: error.message };
+  }
+}
+
+async function repositoryExplorerDataset(repositoryId, options = {}) {
+  const dataset = String(options.dataset || "");
+  const definitions = {
+    files: {
+      table: "code_index_files", where: "file_path ILIKE $2", order: "file_path",
+      fields: "file_path, language, size_bytes, status, skipped_reason, error, indexed_at, metadata"
+    },
+    chunks: {
+      table: "code_chunks", where: "file_path ILIKE $2 OR content ILIKE $2", order: "file_path, chunk_index",
+      fields: "file_path, language, chunk_index, start_line, end_line, content, qdrant_collection, qdrant_point_id, metadata"
+    },
+    symbols: {
+      table: "code_symbols", where: "name ILIKE $2 OR full_name ILIKE $2 OR file_path ILIKE $2", order: "file_path, start_line NULLS LAST, name",
+      fields: "symbol_type, name, full_name, language, file_path, start_line, end_line, parent_name"
+    },
+    relationships: {
+      table: "code_relationships", where: "source_name ILIKE $2 OR target_name ILIKE $2 OR source_file_path ILIKE $2", order: "source_file_path, start_line NULLS LAST",
+      fields: "relationship_type, source_name, target_name, source_file_path, target_file_path, language, start_line, resolution_status"
+    },
+    rules: {
+      table: "code_business_rules", where: "statement ILIKE $2 OR evidence ILIKE $2 OR file_path ILIKE $2", order: "confidence DESC, file_path, start_line",
+      fields: "id, rule_type, statement, confidence::float, confidence_reason, review_status, evidence_status, evidence_score::float, evidence_count, semantic, file_path, language, start_line, end_line, symbol_name, evidence, indexed_commit_sha, updated_at"
+    }
+  };
+  const definition = definitions[dataset];
+  if (!definition) return null;
+  const limit = Math.min(100, Math.max(10, Number.parseInt(options.limit || "50", 10) || 50));
+  const requestedPage = Math.max(1, Number.parseInt(options.page || "1", 10) || 1);
+  const search = String(options.search || "").trim();
+  const pattern = `%${search}%`;
+  const totalResult = await query(`SELECT COUNT(*)::int AS total FROM ${definition.table} WHERE repository_id = $1 AND (${definition.where})`, [repositoryId, pattern]);
+  const total = Number(totalResult.rows[0]?.total || 0);
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  const page = Math.min(requestedPage, totalPages);
+  const rows = await query(`SELECT ${definition.fields} FROM ${definition.table} WHERE repository_id = $1 AND (${definition.where}) ORDER BY ${definition.order} LIMIT $3 OFFSET $4`, [repositoryId, pattern, limit, (page - 1) * limit]);
+  return { dataset, search, page, limit, total, total_pages: totalPages, rows: rows.rows };
+}
+
+async function getRepositoryExplorer(workspaceIdOrSlug, repositoryId, options = {}) {
+  const report = await getRepositoryIndexReport(workspaceIdOrSlug, repositoryId);
+  const repositoryIdValue = report.repository.id;
+  const [stats, qdrant, graph, dataset] = await Promise.all([
+    query(`SELECT
+      (SELECT COUNT(*)::int FROM code_chunks WHERE repository_id = $1) AS chunks,
+      (SELECT COUNT(*)::int FROM code_symbols WHERE repository_id = $1) AS symbols,
+      (SELECT COUNT(*)::int FROM code_relationships WHERE repository_id = $1) AS relationships,
+      (SELECT COUNT(*)::int FROM code_business_rules WHERE repository_id = $1) AS rules`, [repositoryIdValue]),
+    repositoryQdrantSummary(repositoryIdValue),
+    repositoryGraphSummary(repositoryIdValue),
+    repositoryExplorerDataset(repositoryIdValue, options)
+  ]);
+  return {
+    ...report,
+    explorer: {
+      stats: stats.rows[0] || { chunks: 0, symbols: 0, relationships: 0, rules: 0 },
+      dataset,
+      qdrant,
+      graph
+    }
   };
 }
 
@@ -926,6 +1254,7 @@ async function listWorkspaceIndexJobs(workspaceIdOrSlug, options = {}) {
        j.total_chunks,
        j.chunks_indexed,
        j.symbols_indexed,
+       j.business_rules_indexed,
        j.started_at,
        j.started_after,
        j.finished_at,
@@ -967,7 +1296,7 @@ function enrichIndexJobTelemetry(job) {
   const remainingFiles = filesTotal > 0 ? Math.max(filesTotal - filesDone, 0) : null;
   let progressPercent = filesTotal > 0 ? Number(Math.min(100, (filesDone / filesTotal) * 100).toFixed(1)) : 0;
   const pipeline = job.metrics?.pipeline || {};
-  const stageWeights = { scan: 2, files: 35, embeddings: 35, graph_write: 10, relationship_resolution: 9, graph_sync: 7, symbol_linking: 2 };
+  const stageWeights = { scan: 2, files: 30, embeddings: 30, business_rules: 10, graph_write: 10, relationship_resolution: 9, graph_sync: 7, symbol_linking: 2 };
   if (Object.keys(pipeline).length) {
     progressPercent = Number(Object.entries(stageWeights).reduce((sum, [key, weight]) => {
       const stage = pipeline[key] || {};
@@ -1203,6 +1532,7 @@ async function indexRepository(workspace, repository, jobId) {
     });
     await updateStage("files", { label: "Analisando arquivos", status: "running", done: 0, total: files.length });
     await updateStage("embeddings", { label: "Gerando embeddings", status: "pending", done: 0, total: 0 });
+    await updateStage("business_rules", { label: "Identificando regras de negócio", status: "pending", done: 0, total: files.length });
 
     const graphFiles = [];
     const graphSymbols = [];
@@ -1210,6 +1540,7 @@ async function indexRepository(workspace, repository, jobId) {
     let indexedChunks = 0;
     let indexedSymbols = 0;
     let indexedRelationships = 0;
+    let indexedBusinessRules = 0;
     let changedFiles = 0;
     let unchangedFiles = 0;
     let erroredFiles = 0;
@@ -1224,11 +1555,13 @@ async function indexRepository(workspace, repository, jobId) {
         const content = await fs.readFile(file.absolutePath, "utf8");
         const contentHash = sha256(content);
         const previous = previousFiles.get(file.relativePath);
-        if (previous?.status === "indexed" && previous.content_hash === contentHash) {
+        if (previous?.status === "indexed" && previous.content_hash === contentHash && previous.metadata?.business_rule_extractor === "deterministic-semantic-v2") {
           unchangedFiles += 1;
           await incrementIndexJob(jobId, { files: 1 });
           metrics.files = (metrics.files || 0) + 1;
+          metrics.businessRuleFiles = (metrics.businessRuleFiles || 0) + 1;
           await updateStage("files", { done: metrics.files, total: files.length, status: metrics.files >= files.length ? "completed" : "running" });
+          await updateStage("business_rules", { done: metrics.businessRuleFiles, total: files.length, status: metrics.businessRuleFiles >= files.length ? "completed" : "running" });
           continue;
         }
 
@@ -1290,10 +1623,21 @@ async function indexRepository(workspace, repository, jobId) {
           assertIndexNotCanceled(controller.signal);
           await insertCodeRelationship(workspace.id, repository.id, relationship);
         }
+        await updateIndexJob(jobId, { phase: "business_rules" });
+        await updateStage("business_rules", { status: "running", done: metrics.businessRuleFiles || 0, total: files.length });
+        const businessRules = extractBusinessRules(content, file, analysis.symbols, revision.commitSha);
+        for (const rule of businessRules) {
+          assertIndexNotCanceled(controller.signal);
+          await insertBusinessRule(workspace.id, repository.id, rule);
+        }
         metrics.postgres_write_ms += Date.now() - postgresStartedAt;
 
         indexedSymbols += analysis.symbols.length;
         indexedRelationships += analysis.relationships.length;
+        indexedBusinessRules += businessRules.length;
+        metrics.business_rules = indexedBusinessRules;
+        metrics.businessRuleFiles = (metrics.businessRuleFiles || 0) + 1;
+        await updateStage("business_rules", { done: metrics.businessRuleFiles, total: files.length, status: metrics.businessRuleFiles >= files.length ? "completed" : "running" });
         graphFiles.push(file);
         graphSymbols.push(...analysis.symbols);
         graphRelationships.push(...analysis.relationships);
@@ -1304,6 +1648,8 @@ async function indexRepository(workspace, repository, jobId) {
             chunks: fileChunks.length,
             symbols: analysis.symbols.length,
             relationships: analysis.relationships.length,
+            business_rules: businessRules.length,
+            business_rule_extractor: "deterministic-semantic-v2",
             subchunks: fileChunks.filter((chunk) => chunk.metadata?.split_reason === "embedding_context_limit").length,
             failed_chunks: failedChunks
           }
@@ -1322,14 +1668,17 @@ async function indexRepository(workspace, repository, jobId) {
         });
         await incrementIndexJob(jobId, { files: 1 });
         metrics.files = (metrics.files || 0) + 1;
+        metrics.businessRuleFiles = (metrics.businessRuleFiles || 0) + 1;
         await updateStage("files", { done: metrics.files, total: files.length, status: metrics.files >= files.length ? "completed" : "running" });
+        await updateStage("business_rules", { done: metrics.businessRuleFiles, total: files.length, status: metrics.businessRuleFiles >= files.length ? "completed" : "running" });
       }
     }
     activeFilePath = null;
 
     await updateStage("files", { status: "completed", done: files.length, total: files.length });
     await updateStage("embeddings", { status: "completed", done: indexedChunks, total: Math.max(totalChunks, indexedChunks) });
-    await updateIndexJob(jobId, { phase: "graph_write", currentFile: null, symbols: indexedSymbols });
+    await updateStage("business_rules", { status: "completed", done: files.length, total: files.length });
+    await updateIndexJob(jobId, { phase: "graph_write", currentFile: null, symbols: indexedSymbols, businessRules: indexedBusinessRules });
     assertIndexNotCanceled(controller.signal);
     if (graphFiles.length) {
       const neo4jStartedAt = Date.now();
@@ -1356,9 +1705,9 @@ async function indexRepository(workspace, repository, jobId) {
     assertIndexNotCanceled(controller.signal);
     await query(
       `UPDATE code_index_jobs
-       SET status = 'completed', phase = 'completed', current_file = NULL, files_indexed = $2, chunks_indexed = $3, symbols_indexed = $4, finished_at = NOW()
+       SET status = 'completed', phase = 'completed', current_file = NULL, files_indexed = $2, chunks_indexed = $3, symbols_indexed = $4, business_rules_indexed = $5, finished_at = NOW()
        WHERE id = $1`,
-      [jobId, files.length, indexedChunks, indexedSymbols]
+      [jobId, files.length, indexedChunks, indexedSymbols, indexedBusinessRules]
     );
     await query(
       `UPDATE repositories SET indexed_commit_sha = $2, indexed_at = NOW(), updated_at = NOW() WHERE id = $1`,
@@ -1377,6 +1726,7 @@ async function indexRepository(workspace, repository, jobId) {
       chunks: indexedChunks,
       symbols: indexedSymbols,
       relationships: indexedRelationships,
+      business_rules: indexedBusinessRules,
       resolved_relationships: resolutionSummary.resolved,
       unresolved_relationships: resolutionSummary.unresolved
     };
@@ -1532,6 +1882,7 @@ async function runIndexScheduler() {
              total_chunks = 0,
              chunks_indexed = 0,
              symbols_indexed = 0,
+             business_rules_indexed = 0,
              metrics = '{}'::jsonb,
              indexed_commit_sha = NULL,
              repository_dirty = FALSE,
@@ -1614,7 +1965,8 @@ async function updateIndexJob(jobId, changes) {
     totalRepositoryFiles: "total_repository_files",
     skippedFiles: "skipped_files",
     totalChunks: "total_chunks",
-    symbols: "symbols_indexed"
+    symbols: "symbols_indexed",
+    businessRules: "business_rules_indexed"
   };
 
   for (const [key, column] of Object.entries(mapping)) {
@@ -1655,6 +2007,7 @@ async function cleanupRepositoryIndex(repositoryId) {
   await deleteQdrantRepositoryPoints(repositoryId);
   await deleteNeo4jRepository(repositoryId);
   await query("DELETE FROM code_index_files WHERE repository_id = $1", [repositoryId]);
+  await query("DELETE FROM code_business_rules WHERE repository_id = $1", [repositoryId]);
   await query("DELETE FROM code_relationships WHERE repository_id = $1", [repositoryId]);
   await query("DELETE FROM code_symbols WHERE repository_id = $1", [repositoryId]);
   await query("DELETE FROM code_chunks WHERE repository_id = $1", [repositoryId]);
@@ -1663,6 +2016,7 @@ async function cleanupRepositoryIndex(repositoryId) {
 async function cleanupFileIndex(repositoryId, filePath) {
   await deleteQdrantFilePoints(repositoryId, filePath);
   await deleteNeo4jFile(repositoryId, filePath);
+  await query("DELETE FROM code_business_rules WHERE repository_id = $1 AND file_path = $2", [repositoryId, filePath]);
   await query("DELETE FROM code_relationships WHERE repository_id = $1 AND source_file_path = $2", [repositoryId, filePath]);
   await query("DELETE FROM code_symbols WHERE repository_id = $1 AND file_path = $2", [repositoryId, filePath]);
   await query("DELETE FROM code_chunks WHERE repository_id = $1 AND file_path = $2", [repositoryId, filePath]);
@@ -1670,7 +2024,7 @@ async function cleanupFileIndex(repositoryId, filePath) {
 
 async function listRepositoryIndexFiles(repositoryId) {
   const result = await query(
-    `SELECT file_path, language, size_bytes, content_hash, status, skipped_reason, error
+    `SELECT file_path, language, size_bytes, content_hash, status, skipped_reason, error, metadata
      FROM code_index_files
      WHERE repository_id = $1`,
     [repositoryId]
@@ -2143,6 +2497,28 @@ async function insertCodeRelationship(workspaceId, repositoryId, relationship) {
       relationship.line,
       relationship.metadata || {}
     ]
+  );
+}
+
+async function insertBusinessRule(workspaceId, repositoryId, rule) {
+  await query(
+    `INSERT INTO code_business_rules (
+      workspace_id, repository_id, rule_type, statement, confidence, confidence_reason,
+      review_status, evidence_status, evidence_score, evidence_count, semantic,
+      file_path, language, start_line, end_line, symbol_name, evidence, indexed_commit_sha, metadata
+    ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+    ON CONFLICT (repository_id, file_path, start_line, rule_type)
+    DO UPDATE SET statement = EXCLUDED.statement, confidence = EXCLUDED.confidence,
+      confidence_reason = EXCLUDED.confidence_reason, review_status = EXCLUDED.review_status,
+      evidence_status = EXCLUDED.evidence_status, evidence_score = EXCLUDED.evidence_score,
+      evidence_count = EXCLUDED.evidence_count, semantic = EXCLUDED.semantic,
+      end_line = EXCLUDED.end_line, symbol_name = EXCLUDED.symbol_name,
+      evidence = EXCLUDED.evidence, indexed_commit_sha = EXCLUDED.indexed_commit_sha,
+      metadata = EXCLUDED.metadata, updated_at = NOW()`,
+    [workspaceId, repositoryId, rule.ruleType, rule.statement, rule.confidence, rule.confidenceReason,
+      rule.reviewStatus, rule.evidenceStatus || "observed", rule.evidenceScore ?? rule.confidence,
+      rule.evidenceCount || 1, rule.semantic || {}, rule.filePath, rule.language, rule.startLine,
+      rule.endLine, rule.symbolName, rule.evidence, rule.commitSha, rule.metadata || {}]
   );
 }
 
@@ -4119,6 +4495,7 @@ async function cancelIndexJob(workspaceIdOrSlug, jobId) {
        j.total_chunks,
        j.chunks_indexed,
        j.symbols_indexed,
+       j.business_rules_indexed,
        j.started_at,
        j.finished_at,
        j.error,
@@ -4352,6 +4729,16 @@ async function handleApi(req, res, url) {
     return;
   }
 
+  if (req.method === "POST" && url.pathname === "/api/mcp/skill") {
+    sendJson(res, 200, { skill: await createMcpSkill(req, await readBody(req)) });
+    return;
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/mcp/open-webui-prompt") {
+    sendJson(res, 200, { prompt: await createOpenWebUiPrompt(req, await readBody(req)) });
+    return;
+  }
+
   if (req.method === "GET" && url.pathname === "/api/reconciler") {
     sendJson(res, 200, { reconciler: repositoryReconcilerStatus() });
     return;
@@ -4473,6 +4860,14 @@ async function handleApi(req, res, url) {
   const repoReportParams = routeMatch(url.pathname, "/api/workspaces/:workspace/repositories/:repository/index-report");
   if (repoReportParams && req.method === "GET") {
     sendJson(res, 200, await getRepositoryIndexReport(repoReportParams.workspace, repoReportParams.repository));
+    return;
+  }
+
+  const repoExplorerParams = routeMatch(url.pathname, "/api/workspaces/:workspace/repositories/:repository/explorer");
+  if (repoExplorerParams && req.method === "GET") {
+    sendJson(res, 200, await getRepositoryExplorer(repoExplorerParams.workspace, repoExplorerParams.repository, {
+      dataset: url.searchParams.get("dataset"), page: url.searchParams.get("page"), limit: url.searchParams.get("limit"), search: url.searchParams.get("search")
+    }));
     return;
   }
 

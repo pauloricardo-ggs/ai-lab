@@ -18,32 +18,6 @@ CREATE TABLE IF NOT EXISTS workspace_members (
     UNIQUE(workspace_id, user_email)
 );
 
-CREATE TABLE IF NOT EXISTS documents (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-    title TEXT NOT NULL,
-    source TEXT NOT NULL,
-    external_id TEXT,
-    file_path TEXT,
-    content_hash TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',
-    metadata JSONB NOT NULL DEFAULT '{}',
-    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMP NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS document_chunks (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-    chunk_index INTEGER NOT NULL,
-    content TEXT NOT NULL,
-    qdrant_collection TEXT,
-    qdrant_point_id TEXT,
-    metadata JSONB NOT NULL DEFAULT '{}',
-    created_at TIMESTAMP NOT NULL DEFAULT NOW()
-);
-
 CREATE TABLE IF NOT EXISTS repositories (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -146,6 +120,42 @@ CREATE TABLE IF NOT EXISTS code_index_files (
     UNIQUE(repository_id, file_path)
 );
 
+CREATE TABLE IF NOT EXISTS code_business_rules (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    repository_id UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+    rule_type TEXT NOT NULL,
+    statement TEXT NOT NULL,
+    confidence NUMERIC(4,3) NOT NULL CHECK (confidence BETWEEN 0 AND 1),
+    confidence_reason TEXT NOT NULL,
+    review_status TEXT NOT NULL DEFAULT 'proposed',
+    evidence_status TEXT NOT NULL DEFAULT 'observed',
+    evidence_score NUMERIC(4,3) NOT NULL DEFAULT 0.500 CHECK (evidence_score BETWEEN 0 AND 1),
+    evidence_count INTEGER NOT NULL DEFAULT 1,
+    semantic JSONB NOT NULL DEFAULT '{}',
+    file_path TEXT NOT NULL,
+    language TEXT NOT NULL,
+    start_line INTEGER NOT NULL,
+    end_line INTEGER,
+    symbol_name TEXT,
+    evidence TEXT NOT NULL,
+    indexed_commit_sha TEXT,
+    metadata JSONB NOT NULL DEFAULT '{}',
+    created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE(repository_id, file_path, start_line, rule_type)
+);
+
+CREATE TABLE IF NOT EXISTS code_research_sessions (
+    id UUID PRIMARY KEY,
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    repository_id UUID REFERENCES repositories(id) ON DELETE CASCADE,
+    session JSONB NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS code_index_jobs (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     repository_id UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
@@ -162,6 +172,7 @@ CREATE TABLE IF NOT EXISTS code_index_jobs (
     total_chunks INTEGER NOT NULL DEFAULT 0,
     chunks_indexed INTEGER NOT NULL DEFAULT 0,
     symbols_indexed INTEGER NOT NULL DEFAULT 0,
+    business_rules_indexed INTEGER NOT NULL DEFAULT 0,
     priority INTEGER NOT NULL DEFAULT 100,
     queue_position INTEGER,
     requested_by TEXT,
@@ -207,9 +218,7 @@ CREATE TABLE IF NOT EXISTS operational_logs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_documents_workspace_id ON documents(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_operational_logs_created_at ON operational_logs(created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_document_chunks_workspace_id ON document_chunks(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_repositories_workspace_id ON repositories(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_code_symbols_workspace_id ON code_symbols(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_code_symbols_name ON code_symbols(name);
@@ -230,6 +239,11 @@ CREATE INDEX IF NOT EXISTS idx_code_relationships_resolution_status ON code_rela
 CREATE INDEX IF NOT EXISTS idx_code_index_files_workspace_id ON code_index_files(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_code_index_files_repository_id ON code_index_files(repository_id);
 CREATE INDEX IF NOT EXISTS idx_code_index_files_status ON code_index_files(status);
+CREATE INDEX IF NOT EXISTS idx_code_business_rules_workspace ON code_business_rules(workspace_id, confidence DESC);
+CREATE INDEX IF NOT EXISTS idx_code_business_rules_repository ON code_business_rules(repository_id, file_path);
+CREATE INDEX IF NOT EXISTS idx_code_business_rules_type ON code_business_rules(rule_type);
+CREATE INDEX IF NOT EXISTS idx_code_business_rules_evidence_status ON code_business_rules(evidence_status, evidence_score DESC);
+CREATE INDEX IF NOT EXISTS idx_code_research_sessions_expires ON code_research_sessions(expires_at);
 CREATE INDEX IF NOT EXISTS idx_code_index_jobs_repository_id ON code_index_jobs(repository_id);
 CREATE INDEX IF NOT EXISTS idx_code_index_jobs_workspace_id ON code_index_jobs(workspace_id);
 CREATE INDEX IF NOT EXISTS idx_code_index_jobs_queue ON code_index_jobs(status, priority, queue_position, created_at);

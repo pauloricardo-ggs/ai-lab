@@ -9,6 +9,7 @@ continua dedicado a workspaces tecnicos, repositorios e codigo.
 Nao existe vinculo implicito entre uma Knowledge Base do Open WebUI e um
 `workspace_id` do Admin Panel. O fluxo documental tambem nao depende do Knowledge
 MCP nem grava nas tabelas locais `documents` e `document_chunks`.
+Nao existe Knowledge MCP no runtime: agentes tecnicos consultam apenas codigo e Git local pelo Gateway. Consultas documentais devem acontecer pela interface/API e pelos controles de acesso do proprio Open WebUI.
 
 Quando um arquivo e adicionado a uma base, o Open WebUI preserva a relacao entre a
 base (`knowledge_id`) e o arquivo (`file_id`). O Docling apenas converte o arquivo

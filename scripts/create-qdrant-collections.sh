@@ -21,7 +21,6 @@ create_collection() {
   echo "Collection $collection_name ok."
 }
 
-create_collection "business_documents"
 create_collection "code_symbols"
 
 echo "Collections criadas."

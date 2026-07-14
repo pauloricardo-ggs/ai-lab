@@ -11,8 +11,9 @@ Workspace
 ├── slug
 ├── description
 ├── members
-├── documents
 ├── repositories
+├── business rules extracted from code
+├── persisted research sessions
 ├── qdrant payload filter
 └── graph scope
 ```
@@ -37,4 +38,6 @@ Ao criar um workspace pela Admin UI:
 2. a pasta `data/repos/<workspace_slug>` e criada
 3. o workspace passa a aparecer no testador do MCP Gateway
 
-O Open WebUI pode ter Knowledge Bases relacionadas, mas nao e a fonte principal dos workspaces tecnicos.
+O Open WebUI possui suas proprias Knowledge Bases e permissoes, independentes desses workspaces tecnicos. O MCP nao consulta nem replica documentos do Open WebUI.
+
+Para credenciais com menor privilegio, `GATEWAY_WORKSPACE_KEYS_JSON` vincula um token diretamente a um slug. Quando esse token e usado, o Gateway ignora `workspace_id` enviado pelo agente e impede a troca para outro `workspace_slug`.

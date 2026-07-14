@@ -1,62 +1,17 @@
 import http from "node:http";
+import { randomUUID, timingSafeEqual } from "node:crypto";
+import { githubRoutingHint, toolDefinition, toolNames, toolRoutes, validateToolArguments } from "./tools.js";
 
 const port = Number(process.env.PORT || 7000);
 const gatewayApiKey = process.env.GATEWAY_API_KEY || "";
+const workspaceApiKeys = parseWorkspaceApiKeys(process.env.GATEWAY_WORKSPACE_KEYS_JSON || "");
 const protocolVersion = "2025-11-25";
 const supportedProtocolVersions = ["2025-03-26", "2025-06-18", "2025-11-25"];
 
 const serviceRoutes = {
-  knowledge: process.env.KNOWLEDGE_MCP_URL || "http://knowledge-mcp:7101",
   code: process.env.CODE_MCP_URL || "http://code-mcp:7102",
   git: process.env.GIT_MCP_URL || "http://git-mcp:7103"
 };
-
-const toolRoutes = {
-  code_search_symbol: "code", code_get_class: "code", code_get_method: "code", code_find_references: "code",
-  code_find_callers: "code", code_find_callees: "code", code_find_dependencies: "code",
-  code_search_code: "code", code_semantic_search_code: "code", code_explain_architecture: "code",
-  code_analyze_impact: "code",
-  git_get_commit: "git", git_get_history: "git", git_get_pull_request: "git", git_get_diff: "git",
-  git_get_branch: "git", git_list_changed_files: "git", git_find_commits_touching_symbol: "git",
-  git_search_commit_message: "git"
-};
-
-const toolDescriptions = {
-  code_semantic_search_code: "Busca semanticamente trechos de código indexado no workspace.",
-  code_search_code: "Busca trechos de código por relevância no workspace.", code_search_symbol: "Localiza símbolos de código por nome.",
-  code_get_class: "Localiza classes, interfaces, records e structs.", code_get_method: "Localiza métodos e funções.",
-  code_find_references: "Encontra referências, imports, dependências e chamadas de um símbolo.", code_find_callers: "Encontra chamadores de um símbolo.",
-  code_find_callees: "Encontra chamadas originadas por um símbolo.", code_find_dependencies: "Encontra imports e dependências do código.",
-  code_explain_architecture: "Retorna dados para explicar a arquitetura indexada.", code_find_related_documents: "Encontra documentos relacionados ao código.",
-  code_analyze_impact: "Analisa o impacto transitivo de alterar um símbolo ou arquivo.",
-  git_get_commit: "Obtém um commit do clone local.", git_get_history: "Lista o histórico do clone local.",
-  git_get_diff: "Obtém diff entre referências Git.", git_get_branch: "Obtém branch, HEAD e estado do clone local.",
-  git_list_changed_files: "Lista arquivos alterados entre referências.",
-  git_find_commits_touching_symbol: "Encontra commits cujo patch altera um símbolo.",
-  git_search_commit_message: "Pesquisa mensagens de commit."
-};
-
-function toolDefinition(name) {
-  return {
-    name,
-    description: toolDescriptions[name] || `Executa ${name}.`,
-    inputSchema: {
-      type: "object",
-      properties: {
-        workspace_slug: { type: "string", description: "Slug do workspace a consultar." },
-        workspace_id: { type: "string", description: "UUID do workspace a consultar." },
-        repository_id: { type: "string", description: "UUID opcional para restringir ao repositório." },
-        query: { type: "string", description: "Consulta em linguagem natural ou texto de busca." },
-        symbol: { type: "string", description: "Nome do símbolo para consultas de código." },
-        name: { type: "string", description: "Nome do recurso consultado." },
-        limit: { type: "integer", minimum: 1, maximum: 100, description: "Máximo de resultados." }
-      },
-      additionalProperties: true
-    }
-  };
-}
-
-const tools = Object.keys(toolRoutes).sort().map(toolDefinition);
 
 function sendJson(res, status, body, headers = {}) {
   res.writeHead(status, { "content-type": "application/json; charset=utf-8", ...headers });
@@ -67,10 +22,31 @@ function rpcError(id, code, message, data) {
   return { jsonrpc: "2.0", id: id ?? null, error: { code, message, ...(data === undefined ? {} : { data }) } };
 }
 
-function isAuthorized(req) {
-  if (!gatewayApiKey) return true;
+function parseWorkspaceApiKeys(raw) {
+  if (!raw) return new Map();
+  try {
+    const parsed = JSON.parse(raw);
+    return new Map(Object.entries(parsed).filter(([slug, key]) => slug && typeof key === "string" && key));
+  } catch {
+    throw new Error("invalid_GATEWAY_WORKSPACE_KEYS_JSON");
+  }
+}
+
+function authorizationContext(req) {
   const bearer = String(req.headers.authorization || "").replace(/^Bearer\s+/i, "");
-  return bearer === gatewayApiKey || req.headers["x-api-key"] === gatewayApiKey;
+  const presented = bearer || String(req.headers["x-api-key"] || "");
+  if (!gatewayApiKey && workspaceApiKeys.size === 0) return { authorized: true, workspaceSlug: null };
+  if (gatewayApiKey && secretsEqual(presented, gatewayApiKey)) return { authorized: true, workspaceSlug: null };
+  for (const [workspaceSlug, key] of workspaceApiKeys) {
+    if (secretsEqual(presented, key)) return { authorized: true, workspaceSlug };
+  }
+  return { authorized: false, workspaceSlug: null };
+}
+
+function secretsEqual(left, right) {
+  const leftBuffer = Buffer.from(String(left));
+  const rightBuffer = Buffer.from(String(right));
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }
 
 function originAllowed(req) {
@@ -94,10 +70,10 @@ function readBody(req) {
   });
 }
 
-function proxyTool(serviceName, toolName, payload) {
+function proxyTool(serviceName, toolName, payload, requestId) {
   const target = new URL(`/tools/${encodeURIComponent(toolName)}`, serviceRoutes[serviceName]);
   return new Promise((resolve, reject) => {
-    const request = http.request(target, { method: "POST", headers: { "content-type": "application/json", "x-forwarded-by": "mcp-gateway" }, timeout: 30_000 }, (response) => {
+    const request = http.request(target, { method: "POST", headers: { "content-type": "application/json", "x-forwarded-by": "mcp-gateway", "x-request-id": requestId }, timeout: 30_000 }, (response) => {
       let raw = "";
       response.setEncoding("utf8");
       response.on("data", (chunk) => { raw += chunk; });
@@ -112,29 +88,36 @@ function proxyTool(serviceName, toolName, payload) {
   });
 }
 
-async function handleRpc(message) {
+async function handleRpc(message, defaultWorkspaceSlug = "") {
   const id = message?.id;
   if (!message || message.jsonrpc !== "2.0" || typeof message.method !== "string") return rpcError(id, -32600, "Invalid Request");
   if (message.method === "initialize") {
     const requestedVersion = message.params?.protocolVersion;
     const negotiatedVersion = supportedProtocolVersions.includes(requestedVersion) ? requestedVersion : protocolVersion;
-    return { jsonrpc: "2.0", id, result: { protocolVersion: negotiatedVersion, capabilities: { tools: { listChanged: false } }, serverInfo: { name: "ai-knowledge-platform", version: "1.0.0" }, instructions: "Todas as tools exigem workspace_slug ou workspace_id." } };
+    const workspaceInstruction = defaultWorkspaceSlug
+      ? `Servidor de codigo fixado no workspace_slug ${defaultWorkspaceSlug}. Use code_research_flow para fluxos e regras. Tools git_* consultam apenas clones locais; use um MCP GitHub dedicado para pull requests, issues e operacoes remotas.`
+      : "Todas as tools exigem workspace_slug ou workspace_id. Este Gateway consulta codigo indexado e clones Git locais; documentos pertencem exclusivamente ao Open WebUI e operacoes remotas pertencem ao MCP GitHub dedicado.";
+    return { jsonrpc: "2.0", id, result: { protocolVersion: negotiatedVersion, capabilities: { tools: { listChanged: false } }, serverInfo: { name: "ai-code-platform", version: "1.1.0" }, instructions: workspaceInstruction } };
   }
-  if (message.method === "tools/list") return { jsonrpc: "2.0", id, result: { tools } };
+  if (message.method === "tools/list") return { jsonrpc: "2.0", id, result: { tools: toolNames.map((name) => toolDefinition(name, defaultWorkspaceSlug)) } };
   if (message.method !== "tools/call") return rpcError(id, -32601, "Method not found");
 
   const name = message.params?.name;
-  const args = message.params?.arguments || {};
+  const githubHint = githubRoutingHint(name);
+  if (githubHint) return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(githubHint, null, 2) }], isError: true } };
   const serviceName = toolRoutes[name];
-  if (!serviceName) return rpcError(id, -32602, "Unknown tool", { name });
-  if (!args.workspace_id && !args.workspace_slug) return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: "Informe workspace_slug ou workspace_id." }], isError: true } };
+  if (!serviceName) return rpcError(id, -32602, "Unknown tool", { name, available_tools: toolNames });
+  const validation = validateToolArguments(name, message.params?.arguments, defaultWorkspaceSlug);
+  if (validation.error) return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(validation, null, 2) }], isError: true } };
+  const args = validation.args;
 
   try {
     const startedAt = Date.now();
-    console.log(JSON.stringify({ event: "mcp_tool_call", tool: name, workspace_slug: args.workspace_slug || null, workspace_id: args.workspace_id || null }));
-    const upstream = await proxyTool(serviceName, name, args);
+    const requestId = randomUUID();
+    console.log(JSON.stringify({ event: "mcp_tool_call", request_id: requestId, tool: name, service: serviceName, workspace_slug: args.workspace_slug || null, workspace_id: args.workspace_id || null, repository_id: args.repository_id || null }));
+    const upstream = await proxyTool(serviceName, name, args, requestId);
     const isError = upstream.statusCode >= 400;
-    console.log(JSON.stringify({ event: "mcp_tool_result", tool: name, status: upstream.statusCode, latency_ms: Date.now() - startedAt }));
+    console.log(JSON.stringify({ event: "mcp_tool_result", request_id: requestId, tool: name, service: serviceName, status: upstream.statusCode, is_error: isError, result_count: Array.isArray(upstream.body?.matches) ? upstream.body.matches.length : Array.isArray(upstream.body?.items) ? upstream.body.items.length : null, fallback_used: upstream.body?.fallback_used || false, latency_ms: Date.now() - startedAt }));
     return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: JSON.stringify(upstream.body, null, 2) }], isError } };
   } catch (error) {
     return { jsonrpc: "2.0", id, result: { content: [{ type: "text", text: error instanceof Error ? error.message : "gateway_error" }], isError: true } };
@@ -142,10 +125,16 @@ async function handleRpc(message) {
 }
 
 async function handleRequest(req, res) {
-  const pathname = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`).pathname;
+  const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
+  const pathname = url.pathname;
+  const requestedWorkspaceSlug = String(url.searchParams.get("workspace_slug") || "").trim();
+  if (req.method === "GET" && pathname === "/health") { sendJson(res, 200, { status: "ok", service: "mcp-gateway", tools: toolNames.length, document_tools: false }); return; }
   if (!["/mcp", "/mcp/"].includes(pathname)) { sendJson(res, 404, { error: "mcp_endpoint_not_found" }); return; }
   if (!originAllowed(req)) { sendJson(res, 403, rpcError(null, -32000, "Origin not allowed")); return; }
-  if (!isAuthorized(req)) { sendJson(res, 401, rpcError(null, -32001, "Unauthorized"), { "www-authenticate": "Bearer" }); return; }
+  const auth = authorizationContext(req);
+  if (!auth.authorized) { sendJson(res, 401, rpcError(null, -32001, "Unauthorized"), { "www-authenticate": "Bearer" }); return; }
+  if (auth.workspaceSlug && requestedWorkspaceSlug && auth.workspaceSlug !== requestedWorkspaceSlug) { sendJson(res, 403, rpcError(null, -32003, "Workspace scope forbidden")); return; }
+  const defaultWorkspaceSlug = auth.workspaceSlug || requestedWorkspaceSlug;
   if (req.method === "GET") {
     if (!String(req.headers.accept || "").includes("text/event-stream")) { res.writeHead(406); res.end(); return; }
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
@@ -155,7 +144,7 @@ async function handleRequest(req, res) {
   if (req.method !== "POST") { res.writeHead(405, { allow: "POST" }); res.end(); return; }
   try {
     const message = await readBody(req);
-    const response = await handleRpc(message);
+    const response = await handleRpc(message, defaultWorkspaceSlug);
     if (typeof message?.method === "string" && message.method.startsWith("notifications/")) { res.writeHead(202); res.end(); return; }
     sendJson(res, 200, response, { "mcp-protocol-version": protocolVersion });
   } catch (error) {

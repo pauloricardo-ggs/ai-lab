@@ -14,6 +14,5 @@ Responsavel pelo suporte futuro a multiplas linguagens seguindo o mesmo contrato
 ## Regras
 
 - emitir simbolos no mesmo formato de `code_symbols`
-- gerar eventos para `embedding-worker`
+- devolver simbolos e chunks para a Admin UI, que gera os embeddings tecnicos
 - preservar `workspace_id`, `repository_id`, `branch` e `commit_sha`
-

@@ -4,10 +4,14 @@ const state = {
   workspaces: [],
   selectedWorkspace: null,
   mcp: { tools: [], base_url: "" },
+  mcpIntegrationTab: "ide",
+  mcpSkill: { selectedSlugs: new Set(), content: "", name: "" },
+  openWebUiPrompt: { content: "", mcpUrl: "" },
   remoteRepos: [],
   repoSourceMode: "github",
   expandedIndexJobs: new Set(),
   indexReport: null,
+  repositoryExplorer: { data: null, tab: "overview" },
   logs: { entries: [], latestId: 0, retained: 0 },
   indexJobs: {
     running: [],
@@ -55,10 +59,14 @@ const els = {
   repoName: document.querySelector("#repoName"),
   repoUrl: document.querySelector("#repoUrl"),
   repoBranch: document.querySelector("#repoBranch"),
-  qualityReportSection: document.querySelector("#qualityReportSection"),
-  qualityReportTitle: document.querySelector("#qualityReportTitle"),
-  qualityReportSummary: document.querySelector("#qualityReportSummary"),
-  qualityReportBody: document.querySelector("#qualityReportBody"),
+  repositoryExplorer: document.querySelector("#repositoryExplorer"),
+  backToRepositories: document.querySelector("#backToRepositories"),
+  repositoryExplorerId: document.querySelector("#repositoryExplorerId"),
+  repositoryExplorerTitle: document.querySelector("#repositoryExplorerTitle"),
+  repositoryExplorerSubtitle: document.querySelector("#repositoryExplorerSubtitle"),
+  repositoryExplorerStatus: document.querySelector("#repositoryExplorerStatus"),
+  repositoryExplorerTabs: document.querySelector("#repositoryExplorerTabs"),
+  repositoryExplorerBody: document.querySelector("#repositoryExplorerBody"),
   githubRepoSearch: document.querySelector("#githubRepoSearch"),
   loadGithubRepos: document.querySelector("#loadGithubRepos"),
   remoteRepoSelect: document.querySelector("#remoteRepoSelect"),
@@ -90,6 +98,21 @@ const els = {
   mcpBaseUrl: document.querySelector("#mcpBaseUrl"),
   mcpConfigExample: document.querySelector("#mcpConfigExample"),
   toolList: document.querySelector("#toolList"),
+  mcpSkillWorkspaceList: document.querySelector("#mcpSkillWorkspaceList"),
+  mcpSkillSummary: document.querySelector("#mcpSkillSummary"),
+  openWebUiWorkspaceList: document.querySelector("#openWebUiWorkspaceList"),
+  openWebUiWorkspaceSummary: document.querySelector("#openWebUiWorkspaceSummary"),
+  openWebUiEndpointTemplate: document.querySelector("#openWebUiEndpointTemplate"),
+  generateMcpSkill: document.querySelector("#generateMcpSkill"),
+  copyMcpSkill: document.querySelector("#copyMcpSkill"),
+  mcpSkillOutput: document.querySelector("#mcpSkillOutput"),
+  mcpSkillFilename: document.querySelector("#mcpSkillFilename"),
+  mcpSkillContent: document.querySelector("#mcpSkillContent"),
+  generateOpenWebUiPrompt: document.querySelector("#generateOpenWebUiPrompt"),
+  openWebUiPromptOutput: document.querySelector("#openWebUiPromptOutput"),
+  openWebUiPromptContent: document.querySelector("#openWebUiPromptContent"),
+  openWebUiMcpUrl: document.querySelector("#openWebUiMcpUrl"),
+  copyOpenWebUiPrompt: document.querySelector("#copyOpenWebUiPrompt"),
   toast: document.querySelector("#toast")
 };
 
@@ -284,12 +307,9 @@ function resetIndexJobState() {
 
 function resetIndexReport() {
   state.indexReport = null;
-  if (els.qualityReportSection) {
-    els.qualityReportSection.classList.add("hidden");
-    els.qualityReportBody.innerHTML = "";
-    els.qualityReportSummary.textContent = "-";
-    els.qualityReportSummary.className = "status-pill muted";
-  }
+  state.repositoryExplorer = { data: null, tab: "overview" };
+  els.repositoryExplorer?.classList.add("hidden");
+  els.repositoryExplorerBody && (els.repositoryExplorerBody.innerHTML = "");
 }
 
 function showWorkspaceListScreen() {
@@ -306,6 +326,12 @@ function showWorkspaceDetailScreen() {
   els.workspaceDetailScreen.classList.remove("hidden");
 }
 
+function showRepositoryList() {
+  state.repositoryExplorer = { data: null, tab: "overview" };
+  els.repositoryExplorer.classList.add("hidden");
+  els.repoManager.classList.remove("hidden");
+}
+
 function renderRepositories(payload) {
   if (!payload || !state.selectedWorkspace) {
     els.repoEmptyState.classList.remove("hidden");
@@ -319,6 +345,11 @@ function renderRepositories(payload) {
   els.repoManager.classList.remove("hidden");
   els.selectedWorkspaceTitle.textContent = state.selectedWorkspace.name;
   els.selectedWorkspaceSlug.textContent = state.selectedWorkspace.slug;
+
+  if (state.repositoryExplorer.data) {
+    els.repoManager.classList.add("hidden");
+    return;
+  }
 
   const repos = payload.repositories || [];
   els.workspaceDetailRepoCount.textContent = `${repos.length} repos`;
@@ -345,14 +376,15 @@ function renderRepositories(payload) {
           return `
             <tr>
               <td>
-                <strong>${escapeHtml(repo.name)}</strong><br>
+                <button class="repo-explorer-name" data-open-repository-explorer="${repo.id}" type="button">${escapeHtml(repo.name)}</button><br>
+                <small class="muted-text">ID: <code>${escapeHtml(repo.id)}</code></small><br>
                 <span class="muted-text">${escapeHtml(repo.url)}</span>
               </td>
               <td><span class="status-pill ${["active", "indexed"].includes(repo.status) ? "online" : ["error", "index_error", "index_canceled"].includes(repo.status) ? "offline" : "warning"}">${escapeHtml(repo.status)}</span></td>
               <td>${escapeHtml(repo.default_branch || "-")}</td>
               <td><code>${escapeHtml(repo.local_path || "-")}</code></td>
               <td>
-                <button class="secondary-button" data-index-report-repo="${repo.id}">Relatorio</button>
+                <button class="secondary-button" data-open-repository-explorer="${repo.id}">Explorar</button>
                 <button class="secondary-button" data-reindex-repo="${repo.id}" ${indexActive ? "disabled" : ""}>${indexActive ? "Indexando" : "Reindexar"}</button>
                 <button class="danger-button" data-delete-repo="${repo.id}" ${indexActive ? "disabled" : ""}>Remover</button>
               </td>
@@ -365,16 +397,14 @@ function renderRepositories(payload) {
 }
 
 function renderIndexReport(report) {
-  if (!report || !els.qualityReportSection) {
-    resetIndexReport();
-    return;
-  }
+  if (!report || !els.repositoryExplorerBody) return;
 
   const summary = report.summary || {};
   const indexed = Number(summary.indexed || 0);
   const skipped = Number(summary.skipped || 0);
   const errors = Number(summary.errors || 0);
   const total = Number(summary.total || 0);
+  const explorerStats = report.explorer?.stats || {};
   const score = total ? Math.round((indexed / total) * 100) : 0;
   const symbols = sumCounts(report.symbols_by_type);
   const relationships = sumCounts(report.relationships_by_type);
@@ -388,11 +418,7 @@ function renderIndexReport(report) {
       ? `${skipped} arquivo(s) foram ignorados pelas regras de indexação. Isso pode ser esperado.`
       : "Todos os arquivos elegíveis foram processados sem erros registrados.";
 
-  els.qualityReportSection.classList.remove("hidden");
-  els.qualityReportTitle.textContent = `Qualidade · ${report.repository.name}`;
-  els.qualityReportSummary.textContent = `${score}% indexado`;
-  els.qualityReportSummary.className = `status-pill ${errors ? "offline" : skipped ? "warning" : indexed ? "online" : "muted"}`;
-  els.qualityReportBody.innerHTML = `
+  els.repositoryExplorerBody.innerHTML = `
     <div class="quality-score">
       <div class="score-ring" style="--score:${score}"><strong>${score}%</strong></div>
       <div><span class="section-kicker">Cobertura do índice</span><h3>${qualityLabel}</h3><p>${qualityDescription} Taxa de resolução das relações: ${resolutionRate}%.</p></div>
@@ -404,8 +430,15 @@ function renderIndexReport(report) {
       ${metricCard("Erros", errors)}
       ${metricCard("Símbolos", symbols)}
       ${metricCard("Relações", relationships)}
+      ${metricCard("Chunks", explorerStats.chunks)}
+      ${metricCard("Regras", explorerStats.rules)}
       ${metricCard("Resolvidas", resolved)}
       ${metricCard("Não resolvidas", unresolved)}
+    </div>
+    <div class="explorer-sources">
+      ${explorerStatus("PostgreSQL", `${total} arquivos · ${Number(explorerStats.chunks || 0)} chunks · ${Number(explorerStats.symbols || symbols)} símbolos`)}
+      ${explorerStatus("Qdrant", report.explorer?.qdrant?.available ? `${report.explorer.qdrant.points} vetores em ${report.explorer.qdrant.collection}` : report.explorer?.qdrant?.error || "indisponível", report.explorer?.qdrant?.available)}
+      ${explorerStatus("Neo4j", report.explorer?.graph?.available ? `${report.explorer.graph.files} arquivos · ${report.explorer.graph.symbols} símbolos` : report.explorer?.graph?.error || "indisponível", report.explorer?.graph?.available)}
     </div>
     ${renderLatestReportRun(report.latest_job)}
     <div class="quality-columns">
@@ -414,6 +447,8 @@ function renderIndexReport(report) {
       ${reportTable("Simbolos por tipo", report.symbols_by_type, "type")}
       ${reportTable("Relacoes por tipo", report.relationships_by_type, "type")}
       ${reportTable("Resolucao de relacoes", report.relationships_by_resolution, "status")}
+      ${reportTable("Regras observadas por tipo", report.business_rules_by_type, "type")}
+      ${reportTable("Status automático das regras", report.business_rules_by_review, "status")}
       ${relationshipLanguageTable("Relacoes por linguagem", report.relationships_by_language)}
       ${reportTable("Ignorados por motivo", report.ignored_reasons, "reason")}
     </div>
@@ -446,6 +481,85 @@ function metricCard(label, value) {
       <strong>${Number(value || 0)}</strong>
     </div>
   `;
+}
+
+function explorerTable(title, columns, rows = []) {
+  return `<section class="panel explorer-table"><div class="panel-header"><div><span class="section-kicker">PostgreSQL</span><h3>${escapeHtml(title)}</h3></div><span class="muted-text">${rows.length} exibidos</span></div>${rows.length ? `<div class="table-wrap"><table><thead><tr>${columns.map((column) => `<th>${escapeHtml(column.label)}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr>${columns.map((column) => `<td>${column.code ? `<code>${escapeHtml(String(row[column.key] ?? "-"))}</code>` : escapeHtml(String(row[column.key] ?? "-"))}</td>`).join("")}</tr>`).join("")}</tbody></table></div>` : `<div class="empty-state">Sem dados indexados.</div>`}</section>`;
+}
+
+function explorerStatus(label, detail, available = true) {
+  return `<div class="explorer-source ${available ? "" : "unavailable"}"><span>${escapeHtml(label)}</span><strong>${escapeHtml(String(detail))}</strong></div>`;
+}
+
+function renderRepositoryExplorer() {
+  const data = state.repositoryExplorer.data;
+  if (!data) return;
+  const repo = data.repository;
+  const summary = data.summary || {};
+  const explorer = data.explorer || {};
+  const tabs = [["overview", "Visão geral"], ["data", "Dados"], ["collections", "Coleções e grafo"], ["rules", "Regras"]];
+  const errors = Number(summary.errors || 0);
+  const statusClass = errors ? "offline" : repo.status === "indexed" || repo.status === "active" ? "online" : "warning";
+  els.repositoryExplorer.classList.remove("hidden");
+  els.repoManager.classList.add("hidden");
+  els.repositoryExplorerId.textContent = repo.id;
+  els.repositoryExplorerTitle.textContent = repo.name;
+  els.repositoryExplorerSubtitle.textContent = `${repo.url || "Sem URL"} · branch ${repo.default_branch || "-"}`;
+  els.repositoryExplorerStatus.textContent = repo.status;
+  els.repositoryExplorerStatus.className = `status-pill ${statusClass}`;
+  els.repositoryExplorerTabs.innerHTML = tabs.map(([key, label]) => `<button class="explorer-tab ${state.repositoryExplorer.tab === key ? "active" : ""}" data-explorer-tab="${key}" role="tab" aria-selected="${state.repositoryExplorer.tab === key}">${label}</button>`).join("");
+
+  if (state.repositoryExplorer.tab === "overview") {
+    renderIndexReport(data);
+    return;
+  }
+  const sourceSummary = state.repositoryExplorer.tab === "collections" ? `<section class="panel explorer-overview"><div class="explorer-sources">${explorerStatus("Qdrant · coleção", explorer.qdrant?.collection || "code_symbols", explorer.qdrant?.available)}${explorerStatus("Qdrant · vetores deste repositório", explorer.qdrant?.available ? explorer.qdrant.points : explorer.qdrant?.error || "indisponível", explorer.qdrant?.available)}${explorerStatus("Neo4j · arquivos", explorer.graph?.available ? explorer.graph.files : explorer.graph?.error || "indisponível", explorer.graph?.available)}${explorerStatus("Neo4j · símbolos", explorer.graph?.available ? explorer.graph.symbols : explorer.graph?.error || "indisponível", explorer.graph?.available)}</div></section>` : "";
+  els.repositoryExplorerBody.innerHTML = `${sourceSummary}${renderExplorerDataset(explorer.dataset, state.repositoryExplorer.tab)}`;
+}
+
+function semanticList(title, values, formatter) {
+  const entries = Array.isArray(values) ? values : [];
+  return `<div class="semantic-list"><span>${escapeHtml(title)}</span>${entries.length ? `<ul>${entries.map((entry) => `<li>${escapeHtml(formatter(entry))}</li>`).join("")}</ul>` : `<em>Não identificado</em>`}</div>`;
+}
+
+function renderSemanticRuleCard(rule) {
+  const semantic = rule.semantic || {};
+  const preconditions = semantic.preconditions || (semantic.precondition ? [semantic.precondition] : []);
+  const decisions = semantic.decisions || (semantic.decision ? [semantic.decision] : []);
+  const effects = semantic.effects || (semantic.effect ? [semantic.effect] : []);
+  const consequences = semantic.consequences || (semantic.consequence ? [semantic.consequence] : []);
+  const status = rule.evidence_status || "observed";
+  const score = Math.round(Number(rule.evidence_score ?? rule.confidence ?? 0) * 100);
+  return `<article class="panel rule-card"><div class="panel-header"><div><span class="section-kicker">${escapeHtml(rule.rule_type)} · ${escapeHtml(status)}</span><h3>${escapeHtml(rule.statement)}</h3></div><span class="status-pill ${status === "corroborated" ? "online" : status === "contradicted" ? "offline" : "warning"}">${score}%</span></div><div class="semantic-grid">${semanticList("Pré-condições", preconditions, (item) => `${item.subject || "valor"}${item.field ? `.${item.field}` : ""} ${item.operator || ""} ${item.value || ""}`)}${semanticList("Decisões", decisions, (item) => item.action || JSON.stringify(item))}${semanticList("Efeitos", effects, (item) => `${item.subject || ""}${item.field ? `.${item.field}` : ""}${item.value ? ` = ${item.value}` : item.expression ? `: ${item.expression}` : ""}`)}${semanticList("Consequências", consequences, (item) => item.name || item.type || JSON.stringify(item))}</div><p>${escapeHtml(rule.confidence_reason || "Evidência estrutural observada no código.")}</p><details class="rule-evidence"><summary>${Number(rule.evidence_count || 1)} evidência(s) · ${escapeHtml(rule.file_path)}:${Number(rule.start_line || 0)}</summary><pre>${escapeHtml(rule.evidence || "")}</pre></details><div class="rule-meta"><code>${escapeHtml(rule.symbol_name || semantic.operation || "sem símbolo")}</code><span>commit ${escapeHtml(rule.indexed_commit_sha || "não informado")}</span></div></article>`;
+}
+
+function renderExplorerDataset(dataset, tab) {
+  const available = tab === "data" ? [["files", "Arquivos"], ["symbols", "Símbolos"], ["relationships", "Relações"]] : tab === "collections" ? [["chunks", "Chunks"]] : [["rules", "Regras"]];
+  if (!dataset) return `<div class="empty-state">Carregando dados do repositório…</div>`;
+  const labels = { files: "Arquivos", chunks: "Chunks", symbols: "Símbolos", relationships: "Relações", rules: "Regras" };
+  const columns = {
+    files: [["file_path", "Arquivo"], ["language", "Linguagem"], ["status", "Status"], ["size_bytes", "Bytes"]],
+    chunks: [["file_path", "Arquivo"], ["chunk_index", "Chunk"], ["start_line", "Início"], ["end_line", "Fim"], ["content", "Conteúdo"]],
+    symbols: [["name", "Nome"], ["symbol_type", "Tipo"], ["file_path", "Arquivo"], ["start_line", "Linha"]],
+    relationships: [["relationship_type", "Tipo"], ["source_name", "Origem"], ["target_name", "Destino"], ["resolution_status", "Resolução"]],
+    rules: [["rule_type", "Tipo"], ["statement", "Regra"], ["confidence", "Confiança"], ["file_path", "Arquivo"]]
+  }[dataset.dataset] || [];
+  const renderValue = (row, key) => key === "content" ? `<details class="chunk-content"><summary>${escapeHtml(String(row.content || "").slice(0, 140))}${String(row.content || "").length > 140 ? "…" : ""}</summary><pre>${escapeHtml(row.content || "")}</pre></details>` : key === "file_path" ? `<code>${escapeHtml(String(row[key] ?? "-"))}</code>` : escapeHtml(String(row[key] ?? "-"));
+  const content = dataset.dataset === "rules"
+    ? `<section class="explorer-rules">${dataset.rows.map(renderSemanticRuleCard).join("")}</section>`
+    : dataset.rows.length ? `<div class="table-wrap"><table><thead><tr>${columns.map(([, label]) => `<th>${escapeHtml(label)}</th>`).join("")}</tr></thead><tbody>${dataset.rows.map((row) => `<tr>${columns.map(([key]) => `<td>${renderValue(row, key)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>` : `<div class="empty-state">Nenhum registro encontrado.</div>`;
+  return `<section class="panel explorer-table"><div class="panel-header"><div><span class="section-kicker">Dados indexados</span><h3>${labels[dataset.dataset] || "Dados"} · ${dataset.total} no total</h3></div><span class="muted-text">Página ${dataset.page} de ${dataset.total_pages}</span></div><div class="explorer-data-controls"><div class="explorer-dataset-tabs">${available.map(([key, label]) => `<button class="explorer-tab ${dataset.dataset === key ? "active" : ""}" data-explorer-dataset="${key}">${label}</button>`).join("")}</div><input id="explorerDatasetSearch" value="${escapeHtml(dataset.search || "")}" placeholder="Buscar por nome, arquivo${dataset.dataset === "chunks" ? ", palavra ou frase" : ""}"><button class="secondary-button" data-explorer-search>Buscar</button></div>${content}<div class="pagination"><button class="secondary-button small-button" data-explorer-page="${dataset.page - 1}" ${dataset.page <= 1 ? "disabled" : ""}>Anterior</button><span>${dataset.total} registros · página ${dataset.page}/${dataset.total_pages}</span><button class="secondary-button small-button" data-explorer-page="${dataset.page + 1}" ${dataset.page >= dataset.total_pages ? "disabled" : ""}>Próxima</button></div></section>`;
+}
+
+async function loadExplorerDataset(dataset, page = 1, search = "") {
+  const current = state.repositoryExplorer.data;
+  if (!current || !state.selectedWorkspace) return;
+  const params = new URLSearchParams({ dataset, page: String(page), limit: "50" });
+  if (search.trim()) params.set("search", search.trim());
+  const data = await api(`/api/workspaces/${encodeURIComponent(state.selectedWorkspace.slug)}/repositories/${encodeURIComponent(current.repository.id)}/explorer?${params}`);
+  state.indexReport = data;
+  state.repositoryExplorer.data = data;
+  renderRepositoryExplorer();
 }
 
 function sumCounts(rows = []) {
@@ -686,6 +800,7 @@ function renderIndexJob(job, options = {}) {
             <div><span>Arquivos no repo</span><strong>${repoTotal || "—"}</strong></div>
             <div><span>Ignorados</span><strong>${skippedFiles}</strong></div>
             <div><span>Símbolos</span><strong>${Number(job.symbols_indexed || 0)}</strong></div>
+            <div><span>Regras identificadas</span><strong>${Number(job.business_rules_indexed || 0)}</strong></div>
             <div><span>Restantes</span><strong>${telemetry.remainingFiles ?? "—"}</strong></div>
             <div><span>Início</span><strong>${formatDateTime(job.started_at || job.created_at)}</strong></div>
             <div><span>Tempo em fila</span><strong>${formatDuration((job.started_after ? new Date(job.started_after) : new Date()) - new Date(job.created_at))}</strong></div>
@@ -713,7 +828,7 @@ function liveTelemetry(job) {
   const chunksPerMinute = minutes > 0 ? chunksDone / minutes : Number(telemetry.chunks_per_minute || 0);
   const remainingFiles = total > 0 ? Math.max(total - filesDone, 0) : null;
   const stages = job.telemetry?.stages || job.metrics?.pipeline || {};
-  const weights = { scan: 2, files: 35, embeddings: 35, graph_write: 10, relationship_resolution: 9, graph_sync: 7, symbol_linking: 2 };
+  const weights = { scan: 2, files: 30, embeddings: 30, business_rules: 10, graph_write: 10, relationship_resolution: 9, graph_sync: 7, symbol_linking: 2 };
   let progressPercent = total > 0 ? Math.min(100, (filesDone / total) * 100) : 0;
   if (Object.keys(stages).length) {
     progressPercent = Object.entries(weights).reduce((sum, [key, weight]) => {
@@ -728,6 +843,7 @@ function liveTelemetry(job) {
 function renderPipelineStages(job, telemetry) {
   const definitions = [
     ["scan", "Mapeamento"], ["files", "Análise de arquivos"], ["embeddings", "Embeddings"],
+    ["business_rules", "Regras de negócio"],
     ["graph_write", "Gravação no Neo4j"], ["relationship_resolution", "Resolução de relações"],
     ["graph_sync", "Sincronização do grafo"], ["symbol_linking", "Vínculos entre símbolos"]
   ];
@@ -826,6 +942,7 @@ function phaseLabel(phase) {
     extracting: "extraindo arquivos",
     embedding: "gerando embeddings",
     symbols: "extraindo simbolos",
+    business_rules: "identificando regras de negócio",
     graph: "montando grafo",
     graph_write: "gravando grafo",
     resolving_relationships: "resolvendo relações",
@@ -853,6 +970,7 @@ function formatDateTime(value) {
 
 function renderMcp() {
   els.mcpBaseUrl.textContent = state.mcp.base_url || "-";
+  els.openWebUiEndpointTemplate.textContent = state.mcp.base_url ? `${state.mcp.base_url}?workspace_slug=<workspace_slug>` : "-";
   els.mcpConfigExample.textContent = `[mcp_servers.company]
 url = "${state.mcp.base_url || "http://<IP_DO_SERVIDOR>:7000/mcp"}"
 headers = { "Authorization" = "Bearer <GATEWAY_API_KEY>" }`;
@@ -861,6 +979,48 @@ headers = { "Authorization" = "Bearer <GATEWAY_API_KEY>" }`;
     ? state.mcp.tools.map((tool) => `<span>${escapeHtml(tool)}</span>`).join("")
     : `<div class="empty-state">Nenhuma tool disponivel ou Gateway indisponivel.</div>`;
 
+}
+
+function setMcpIntegrationTab(tab) {
+  state.mcpIntegrationTab = tab === "open-webui" ? "open-webui" : "ide";
+  document.querySelectorAll("[data-mcp-tab]").forEach((button) => {
+    const active = button.dataset.mcpTab === state.mcpIntegrationTab;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
+  document.querySelector("#mcpIdePanel")?.classList.toggle("active", state.mcpIntegrationTab === "ide");
+  document.querySelector("#mcpOpenWebUiPanel")?.classList.toggle("active", state.mcpIntegrationTab === "open-webui");
+}
+
+function renderMcpSkill() {
+  const available = new Set(state.workspaces.map((workspace) => workspace.slug));
+  state.mcpSkill.selectedSlugs = new Set([...state.mcpSkill.selectedSlugs].filter((slug) => available.has(slug)));
+  const selectedCount = state.mcpSkill.selectedSlugs.size;
+  const summary = selectedCount
+    ? `${selectedCount} workspace${selectedCount === 1 ? "" : "s"} selecionado${selectedCount === 1 ? "" : "s"}.`
+    : "Selecione ao menos um workspace.";
+  els.mcpSkillSummary.textContent = summary;
+  els.openWebUiWorkspaceSummary.textContent = selectedCount === 1
+    ? "1 workspace selecionado. O Gateway ficará fixado nele."
+    : "Selecione exatamente um workspace.";
+  els.generateMcpSkill.disabled = !selectedCount;
+  els.generateOpenWebUiPrompt.disabled = selectedCount !== 1;
+  const workspaceOptions = state.workspaces.length
+    ? state.workspaces.map((workspace) => `<label class="mcp-skill-workspace"><input type="checkbox" data-mcp-skill-workspace="${escapeHtml(workspace.slug)}" ${state.mcpSkill.selectedSlugs.has(workspace.slug) ? "checked" : ""}><span><strong>${escapeHtml(workspace.name)}</strong><code>${escapeHtml(workspace.slug)}</code><small>${Number(workspace.repository_count || 0)} repositório${Number(workspace.repository_count || 0) === 1 ? "" : "s"} mapeado${Number(workspace.repository_count || 0) === 1 ? "" : "s"}</small></span></label>`).join("")
+    : `<div class="empty-state">Crie um workspace antes de gerar uma configuração.</div>`;
+  els.mcpSkillWorkspaceList.innerHTML = workspaceOptions;
+  els.openWebUiWorkspaceList.innerHTML = workspaceOptions;
+  els.mcpSkillOutput.classList.toggle("hidden", !state.mcpSkill.content);
+  els.copyMcpSkill.disabled = !state.mcpSkill.content;
+  if (state.mcpSkill.content) {
+    els.mcpSkillFilename.textContent = `${state.mcpSkill.name || "company-mcp"}/SKILL.md`;
+    els.mcpSkillContent.textContent = state.mcpSkill.content;
+  }
+  els.openWebUiPromptOutput.classList.toggle("hidden", !state.openWebUiPrompt.content);
+  if (state.openWebUiPrompt.content) {
+    els.openWebUiPromptContent.textContent = state.openWebUiPrompt.content;
+    els.openWebUiMcpUrl.textContent = state.openWebUiPrompt.mcpUrl || "-";
+  }
 }
 
 async function loadServices() {
@@ -890,6 +1050,7 @@ async function loadWorkspaces() {
     }
   }
   renderWorkspaces();
+  renderMcpSkill();
   if (els.graphWorkspace) {
     const selected = els.graphWorkspace.value;
     els.graphWorkspace.innerHTML = `<option value="">Selecione um workspace</option>${state.workspaces.map((workspace) => `<option value="${escapeHtml(workspace.slug)}">${escapeHtml(workspace.name)}</option>`).join("")}`;
@@ -1166,20 +1327,75 @@ document.addEventListener("click", async (event) => {
     return;
   }
 
-  const indexReportButton = event.target.closest("[data-index-report-repo]");
-  if (indexReportButton && state.selectedWorkspace) {
+  const explorerButton = event.target.closest("[data-open-repository-explorer]");
+  if (explorerButton && state.selectedWorkspace) {
     try {
-      indexReportButton.disabled = true;
-      indexReportButton.textContent = "Carregando";
-      const report = await api(`/api/workspaces/${encodeURIComponent(state.selectedWorkspace.slug)}/repositories/${encodeURIComponent(indexReportButton.dataset.indexReportRepo)}/index-report`);
-      state.indexReport = report;
-      renderIndexReport(report);
-      els.qualityReportSection.scrollIntoView({ behavior: "smooth", block: "start" });
+      explorerButton.disabled = true;
+      explorerButton.textContent = "Carregando";
+      const data = await api(`/api/workspaces/${encodeURIComponent(state.selectedWorkspace.slug)}/repositories/${encodeURIComponent(explorerButton.dataset.openRepositoryExplorer)}/explorer`);
+      state.indexReport = data;
+      state.repositoryExplorer = { data, tab: "overview" };
+      renderRepositoryExplorer();
+      window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (error) {
       toast(error.message);
     } finally {
-      indexReportButton.disabled = false;
-      indexReportButton.textContent = "Relatorio";
+      explorerButton.disabled = false;
+      explorerButton.textContent = "Explorar";
+    }
+    return;
+  }
+
+  const explorerTab = event.target.closest("[data-explorer-tab]");
+  if (explorerTab && state.repositoryExplorer.data) {
+    state.repositoryExplorer.tab = explorerTab.dataset.explorerTab;
+    if (state.repositoryExplorer.tab === "overview") {
+      renderRepositoryExplorer();
+    } else {
+      const dataset = state.repositoryExplorer.tab === "data" ? "files" : state.repositoryExplorer.tab === "collections" ? "chunks" : "rules";
+      try {
+        await loadExplorerDataset(dataset);
+      } catch (error) {
+        toast(error.message);
+      }
+    }
+    return;
+  }
+
+  const datasetButton = event.target.closest("[data-explorer-dataset]");
+  if (datasetButton && state.repositoryExplorer.data) {
+    try {
+      await loadExplorerDataset(datasetButton.dataset.explorerDataset);
+    } catch (error) {
+      toast(error.message);
+    }
+    return;
+  }
+
+  const explorerSearchButton = event.target.closest("[data-explorer-search]");
+  if (explorerSearchButton && state.repositoryExplorer.data) {
+    const dataset = state.repositoryExplorer.data.explorer?.dataset?.dataset;
+    const search = document.querySelector("#explorerDatasetSearch")?.value || "";
+    if (dataset) {
+      try {
+        await loadExplorerDataset(dataset, 1, search);
+      } catch (error) {
+        toast(error.message);
+      }
+    }
+    return;
+  }
+
+  const explorerPageButton = event.target.closest("[data-explorer-page]");
+  if (explorerPageButton && state.repositoryExplorer.data) {
+    const dataset = state.repositoryExplorer.data.explorer?.dataset;
+    const page = Number(explorerPageButton.dataset.explorerPage);
+    if (dataset && Number.isFinite(page) && page >= 1 && page <= dataset.total_pages) {
+      try {
+        await loadExplorerDataset(dataset.dataset, page, dataset.search || "");
+      } catch (error) {
+        toast(error.message);
+      }
     }
     return;
   }
@@ -1288,6 +1504,85 @@ els.openWorkspaceGraph?.addEventListener("click", () => {
 });
 
 els.refreshButton.addEventListener("click", refreshAll);
+els.backToRepositories?.addEventListener("click", showRepositoryList);
+
+const handleMcpWorkspaceSelection = (event) => {
+  const checkbox = event.target.closest("[data-mcp-skill-workspace]");
+  if (!checkbox) return;
+  const slug = checkbox.dataset.mcpSkillWorkspace;
+  if (event.currentTarget === els.openWebUiWorkspaceList && checkbox.checked) state.mcpSkill.selectedSlugs = new Set([slug]);
+  else if (checkbox.checked) state.mcpSkill.selectedSlugs.add(slug);
+  else state.mcpSkill.selectedSlugs.delete(slug);
+  state.mcpSkill.content = "";
+  state.mcpSkill.name = "";
+  state.openWebUiPrompt.content = "";
+  state.openWebUiPrompt.mcpUrl = "";
+  renderMcpSkill();
+};
+els.mcpSkillWorkspaceList?.addEventListener("change", handleMcpWorkspaceSelection);
+els.openWebUiWorkspaceList?.addEventListener("change", handleMcpWorkspaceSelection);
+
+document.querySelectorAll("[data-mcp-tab]").forEach((button) => {
+  button.addEventListener("click", () => setMcpIntegrationTab(button.dataset.mcpTab));
+});
+
+els.generateMcpSkill?.addEventListener("click", async () => {
+  try {
+    els.generateMcpSkill.disabled = true;
+    els.generateMcpSkill.textContent = "Gerando…";
+    const data = await api("/api/mcp/skill", {
+      method: "POST",
+      body: JSON.stringify({ workspace_slugs: [...state.mcpSkill.selectedSlugs] })
+    });
+    state.mcpSkill.content = data.skill?.content || "";
+    state.mcpSkill.name = data.skill?.name || "company-mcp";
+    renderMcpSkill();
+    toast("Skill gerada. Copie o conteúdo para SKILL.md do seu agente.");
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    els.generateMcpSkill.textContent = "Gerar skill";
+    els.generateMcpSkill.disabled = state.mcpSkill.selectedSlugs.size === 0;
+  }
+});
+
+els.copyMcpSkill?.addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(state.mcpSkill.content);
+    toast("SKILL.md copiado para a área de transferência.");
+  } catch {
+    toast("Não foi possível copiar automaticamente. Selecione o conteúdo abaixo.");
+  }
+});
+
+els.generateOpenWebUiPrompt?.addEventListener("click", async () => {
+  try {
+    els.generateOpenWebUiPrompt.disabled = true;
+    els.generateOpenWebUiPrompt.textContent = "Gerando…";
+    const data = await api("/api/mcp/open-webui-prompt", {
+      method: "POST",
+      body: JSON.stringify({ workspace_slugs: [...state.mcpSkill.selectedSlugs] })
+    });
+    state.openWebUiPrompt.content = data.prompt?.content || "";
+    state.openWebUiPrompt.mcpUrl = data.prompt?.mcp_url || "";
+    renderMcpSkill();
+    toast("Prompt do Open WebUI gerado.");
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    els.generateOpenWebUiPrompt.textContent = "Gerar prompt Open WebUI";
+    els.generateOpenWebUiPrompt.disabled = state.mcpSkill.selectedSlugs.size !== 1;
+  }
+});
+
+els.copyOpenWebUiPrompt?.addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(state.openWebUiPrompt.content);
+    toast("Prompt do Open WebUI copiado.");
+  } catch {
+    toast("Não foi possível copiar automaticamente. Selecione o conteúdo abaixo.");
+  }
+});
 
 els.saveAdminKey.addEventListener("click", () => {
   localStorage.setItem("adminApiKey", els.adminKey.value.trim());

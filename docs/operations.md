@@ -24,6 +24,12 @@ docker compose logs -f
 ./scripts/check-health.sh
 ```
 
+Valide contratos, roteamento com upstream simulado, ranking e extracao de regras sem depender da stack:
+
+```bash
+./scripts/test-mcp.sh
+```
+
 ## Admin UI
 
 URL padrao:
@@ -117,6 +123,18 @@ A retenção remove automaticamente eventos com mais de 30 dias. A limpeza ocorr
 ao iniciar o Admin, uma vez por dia e também durante gravações em lote. Em memória
 o processo mantém somente uma janela limitada; o histórico é consultado no banco.
 A API administrativa equivalente é `GET /api/logs?after=<id>&limit=200`.
+
+O Gateway registra uma linha estruturada no inicio e no fim de cada tool com `request_id`, servico, workspace, repositorio, status, latencia, contagem de resultados e uso de fallback. Use o `request_id` para correlacionar a chamada com Code MCP ou Git MCP.
+
+## Credenciais MCP
+
+`GATEWAY_API_KEY` concede acesso aos workspaces informados na chamada e deve ser reservado a administracao. Para agentes permanentes, prefira tokens fixados por slug:
+
+```dotenv
+GATEWAY_WORKSPACE_KEYS_JSON={"workspace-a":"segredo-a","workspace-b":"segredo-b"}
+```
+
+Operacoes GitHub remotas nao usam essa credencial. Configure um MCP GitHub separado no agente e mantenha as permissoes do token GitHub independentes das permissoes do Gateway tecnico.
 
 ## Upgrade de Imagens
 

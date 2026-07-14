@@ -19,7 +19,7 @@ const pool = new Pool({
   max: 4
 });
 const tools = [
-  "git_get_commit", "git_get_history", "git_get_pull_request", "git_get_diff", "git_get_branch",
+  "git_get_commit", "git_get_history", "git_get_diff", "git_get_branch",
   "git_list_changed_files", "git_find_commits_touching_symbol", "git_search_commit_message"
 ];
 
@@ -48,8 +48,26 @@ function boundedLimit(value, fallback = 25, maximum = 200) {
 }
 function reference(value, fallback) {
   const ref = String(value || fallback);
-  if (!ref || ref.startsWith("-") || /[\0\r\n]/.test(ref)) fail("invalid_git_reference");
+  if (!ref || ref.length > 500 || ref.startsWith("-") || /[\0\r\n]/.test(ref)) fail("invalid_git_reference");
   return ref;
+}
+function relativeGitPath(value) {
+  if (value === undefined || value === null || value === "") return null;
+  const candidate = String(value).replaceAll("\\", "/");
+  if (candidate.length > 2000 || candidate.startsWith("/") || candidate.startsWith(":") || candidate.split("/").includes("..") || /[\0\r\n]/.test(candidate)) fail("invalid_repository_path");
+  return candidate;
+}
+function regexLiteral(value) { return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+
+async function diffStartReference(cwd, value, fallback = "HEAD^") {
+  const candidate = reference(value, fallback);
+  try {
+    await git(cwd, ["rev-parse", "--verify", candidate]);
+    return candidate;
+  } catch (error) {
+    if (candidate.endsWith("^")) return EMPTY_TREE;
+    throw error;
+  }
 }
 
 async function resolveRepository(payload) {
@@ -114,32 +132,37 @@ async function executeTool(tool, payload) {
     return { ...base, result: { ...records[0], files } };
   }
   if (tool === "git_get_history" || tool === "git_search_commit_message") {
+    const messageQuery = String(payload.query || payload.message || "").trim();
+    if (tool === "git_search_commit_message" && !messageQuery) fail("query_required");
     const args = ["log", `--max-count=${boundedLimit(payload.limit)}`, `--format=${commitFormat}`];
     if (payload.ref) args.push(reference(payload.ref));
-    if (payload.path) args.push("--", String(payload.path));
-    if (tool === "git_search_commit_message") args.splice(1, 0, "--regexp-ignore-case", `--grep=${String(payload.query || payload.message || "")}`);
+    const requestedPath = relativeGitPath(payload.path);
+    if (requestedPath) args.push("--", requestedPath);
+    if (tool === "git_search_commit_message") args.splice(1, 0, "--fixed-strings", "--regexp-ignore-case", `--grep=${messageQuery.slice(0, 500)}`);
     return { ...base, items: parseRecords(await git(cwd, args), ["sha", "short_sha", "author_name", "author_email", "authored_at", "subject", "decorations"]) };
   }
   if (tool === "git_get_diff") {
-    const from = reference(payload.from || payload.base || repository.indexed_commit_sha, "HEAD^");
+    const from = await diffStartReference(cwd, payload.from || payload.base || repository.indexed_commit_sha);
     const to = reference(payload.to || payload.head, "HEAD");
     const args = ["diff", "--no-ext-diff", `--unified=${boundedLimit(payload.context, 3, 20)}`, from, to];
-    if (payload.path) args.push("--", String(payload.path));
+    const requestedPath = relativeGitPath(payload.path);
+    if (requestedPath) args.push("--", requestedPath);
     return { ...base, result: { from, to, diff: await git(cwd, args), files: await changedFiles(cwd, from, to) } };
   }
   if (tool === "git_list_changed_files") {
-    const from = reference(payload.from || payload.base || repository.indexed_commit_sha, "HEAD^");
+    const from = await diffStartReference(cwd, payload.from || payload.base || repository.indexed_commit_sha);
     const to = reference(payload.to || payload.head, "HEAD");
     return { ...base, from, to, items: await changedFiles(cwd, from, to) };
   }
   if (tool === "git_find_commits_touching_symbol") {
     const symbol = String(payload.symbol || payload.query || "").trim();
     if (!symbol) fail("symbol_required");
-    const args = ["log", `--max-count=${boundedLimit(payload.limit)}`, "-G", symbol, `--format=${commitFormat}`];
-    if (payload.path) args.push("--", String(payload.path));
+    const args = ["log", `--max-count=${boundedLimit(payload.limit)}`, "-G", regexLiteral(symbol.slice(0, 500)), `--format=${commitFormat}`];
+    const requestedPath = relativeGitPath(payload.path);
+    if (requestedPath) args.push("--", requestedPath);
     return { ...base, query: symbol, items: parseRecords(await git(cwd, args), ["sha", "short_sha", "author_name", "author_email", "authored_at", "subject", "decorations"]) };
   }
-  fail("pull_requests_unavailable_for_local_clone", 501);
+  fail("tool_not_implemented", 501);
 }
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 async function changedFiles(cwd, from, to) {

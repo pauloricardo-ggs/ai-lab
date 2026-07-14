@@ -12,11 +12,10 @@ Esta plataforma sobe uma stack interna composta por:
 - Neo4j
 - Admin UI
 - MCP Gateway
-- Knowledge MCP
 - Code MCP
 - Git MCP
 
-Ela permite que usuarios de negocio façam upload e consulta de documentos pelo Open WebUI e que desenvolvedores consultem conhecimento tecnico e documental por meio de agentes compativeis com MCP.
+Ela permite que usuarios de negocio façam upload e consulta de documentos exclusivamente pelo Open WebUI e que desenvolvedores consultem codigo indexado e historico Git local por meio de agentes compativeis com MCP.
 
 ## Requisitos
 
@@ -147,7 +146,9 @@ url = "http://<IP_DO_SERVIDOR>:7000/mcp"
 headers = { "Authorization" = "Bearer <GATEWAY_API_KEY>" }
 ```
 
-O Gateway exige `workspace_id` ou `workspace_slug` em chamadas de tools para impedir vazamento entre workspaces.
+O Gateway exige `workspace_id` ou `workspace_slug` em chamadas de tools. Para fixar o escopo no servidor, use `?workspace_slug=<slug>`. Tokens opcionais configurados em `GATEWAY_WORKSPACE_KEYS_JSON` podem ficar vinculados a um unico workspace.
+
+As tools `git_*` consultam apenas clones locais. Pull requests, issues, reviews e outras operacoes remotas devem usar um MCP GitHub dedicado; o Gateway devolve uma orientacao explicita quando recebe uma tool `github_*` por engano.
 
 ## Admin UI
 
@@ -260,10 +261,11 @@ Ao adicionar um repositorio pela Admin UI, a plataforma inicia a indexacao em ba
 6. grava chunks em `code_chunks`
 7. grava simbolos em `code_symbols`, incluindo hierarquia quando conhecida
 8. grava relacoes tecnicas em `code_relationships`
-9. resolve relacoes para arquivos, simbolos ou repositorios reais do workspace
-10. salva vetores no Qdrant na collection `code_symbols`
-11. cria nos e relacionamentos no Neo4j sob o no `Workspace`
-12. marca o repositorio como `indexed` ao concluir
+9. extrai comportamentos e fluxos candidatos a regras de negocio em `code_business_rules`, com evidencia, confianca, status automatico e estrutura semantica
+10. resolve relacoes para arquivos, simbolos ou repositorios reais do workspace
+11. salva vetores no Qdrant na collection `code_symbols`
+12. cria nos e relacionamentos no Neo4j sob o no `Workspace`
+13. marca o repositorio como `indexed` ao concluir
 
 O repositorio e a unidade de ingestao, mas o escopo do indice e do grafo e sempre o workspace. Isso permite consultar e relacionar repositorios diferentes dentro do mesmo workspace. O grafo usa `Workspace -> Repository -> CodeFile -> CodeSymbol`, cria hierarquia local com `CONTAINS_SYMBOL`, relaciona referencias resolvidas com `RESOLVES_TO` e cria `RELATED_SYMBOL` entre simbolos de mesmo nome em repositorios diferentes do workspace.
 
@@ -287,7 +289,9 @@ Enquanto a indexacao esta rodando, o status fica `indexing`. A Admin UI mostra o
 
 A plataforma nao permite iniciar outra reindexacao para um repositorio que ja tenha job ativo. Jobs em execucao podem ser cancelados na tela do workspace; ao cancelar, o job fica `canceled` e o repositorio fica `index_canceled`.
 
-As tools MCP `code_search_code`, `code_semantic_search_code`, `code_search_symbol`, `code_get_class`, `code_get_method`, `code_find_references`, `code_find_callers`, `code_find_callees` e `code_find_dependencies` ja consultam os dados indexados por workspace. As tools de relacao retornam tambem o alvo resolvido quando houver simbolo, arquivo ou repositorio correspondente.
+As tools MCP consultam dados reais por workspace. `code_research_flow` combina busca semantica e lexical com RRF, simbolos, relacoes e regras extraidas; `code_research_continue` persiste o cursor no PostgreSQL. `code_search_business_rules` retorna comportamento observado no codigo com proveniencia e nao incorpora documentos do Open WebUI.
+
+Execute `./scripts/test-mcp.sh` para validar contratos, ranking, extracao de regras e o protocolo MCP E2E com upstream simulado.
 
 ## Roadmap
 
@@ -305,5 +309,5 @@ Antes de expor fora da rede interna, configure:
 - autenticacao corporativa
 - firewall
 - OIDC/OAuth2
-- controle de acesso por workspace
+- tokens ou autenticacao corporativa vinculados ao workspace
 - auditoria completa

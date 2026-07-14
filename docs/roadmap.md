@@ -1,6 +1,6 @@
 # Roadmap da Plataforma
 
-Atualizado em: 2026-07-12
+Atualizado em: 2026-07-13
 
 Este documento descreve o que ja foi implementado, o que ainda precisa ser implementado e a ordem recomendada para continuacao do desenvolvimento. Ele deve ser usado como handoff para agentes e desenvolvedores que forem assumir novas melhorias.
 
@@ -8,10 +8,10 @@ Este documento descreve o que ja foi implementado, o que ainda precisa ser imple
 
 Construir uma plataforma interna de IA, local-first, para:
 
-1. Permitir upload, indexacao e consulta de documentos corporativos por workspace.
+1. Manter upload, indexacao e consulta de documentos corporativos no Open WebUI.
 2. Indexar repositorios de codigo por workspace.
-3. Relacionar codigo, documentos, dependencias e historico Git.
-4. Expor esse conhecimento via MCP Gateway para agentes externos como Codex, Claude, Cursor e VS Code.
+3. Relacionar codigo, regras observadas, dependencias e historico Git local.
+4. Expor conhecimento tecnico via MCP Gateway para agentes externos como Codex, Claude, Cursor e VS Code.
 5. Manter execucao do servidor com modelos locais/open source, sem exigir provedores externos para inferencia ou embeddings.
 
 ## Decisoes de Arquitetura Ja Tomadas
@@ -24,6 +24,8 @@ Construir uma plataforma interna de IA, local-first, para:
 - O MCP Gateway sempre exige `workspace_id` ou `workspace_slug`.
 - Repositorios sao gerenciados pela Admin UI e clonados em `data/repos/<workspace_slug>/<repo>`.
 - Open WebUI atende usuarios de negocio; MCP atende agentes tecnicos externos.
+- Open WebUI e a unica autoridade documental; o MCP nao expoe Knowledge nem documentos.
+- GitHub remoto e responsabilidade de um MCP GitHub dedicado; o Gateway tecnico opera clones locais.
 - Qdrant armazena vetores.
 - Neo4j armazena grafo tecnico.
 - PostgreSQL armazena metadados, inventario, chunks, simbolos, relacoes, jobs e workspaces.
@@ -51,7 +53,6 @@ Construir uma plataforma interna de IA, local-first, para:
   - Open WebUI
   - Admin UI
   - MCP Gateway
-  - Knowledge MCP
   - Code MCP
   - Git MCP
   - Roslyn Indexer
@@ -68,11 +69,11 @@ Tabelas principais implementadas:
 
 - `workspaces`
 - `repositories`
-- `documents`
-- `document_chunks`
 - `code_chunks`
 - `code_symbols`
 - `code_relationships`
+- `code_business_rules`
+- `code_research_sessions`
 - `code_index_files`
 - `code_index_jobs`
 - `mcp_audit_logs`
@@ -302,9 +303,12 @@ Implementado:
 - endpoint MCP Streamable HTTP em `/mcp`
 - `initialize`, `tools/list` e `tools/call` via JSON-RPC MCP
 - Validacao de API key quando configurada.
+- Tokens opcionais vinculados a workspace.
 - Exigencia de workspace nas chamadas.
-- Roteamento para Knowledge MCP, Code MCP e Git MCP.
-- Auditoria basica de chamadas MCP em PostgreSQL.
+- Roteamento somente para Code MCP e Git MCP local.
+- Schemas fechados e especificos por tool.
+- Correlation ID, latencia, status, contagem de resultados e fallback em logs estruturados.
+- Orientacao explicita para encaminhar `github_*` ao MCP GitHub dedicado.
 
 ### Code MCP
 
@@ -319,6 +323,11 @@ Implementado com dados reais:
 - `code.find_callers`
 - `code.find_callees`
 - `code.find_dependencies`
+- `code.explain_architecture`
+- `code.analyze_impact`
+- `code.search_business_rules`
+- `code.research_flow`
+- `code.research_continue`
 
 As tools de relacao retornam dados de resolucao quando disponiveis:
 
@@ -332,39 +341,11 @@ As tools de relacao retornam dados de resolucao quando disponiveis:
 - `target_symbol_file_path`
 - `target_symbol_start_line`
 
-Ainda pendente:
-
-- `code.explain_architecture` real.
-- `code.find_related_documents` real.
-- Consultas diretas ao Neo4j para caminhos e impacto.
-
-### Knowledge MCP
-
-Estado atual:
-
-- Tools expostas no Gateway.
-- Implementacao ainda limitada/placeholder para boa parte das consultas.
-
-Pendencias:
-
-- Consultar documentos reais por workspace.
-- Integrar com documentos enviados pelo Open WebUI ou pipeline proprio.
-- Busca vetorial em Qdrant para documentos.
-- Citacoes e recuperacao de chunks/documentos.
+O ranking amplo usa Reciprocal Rank Fusion e diversificacao por arquivo/repositorio. As sessoes sao persistidas em PostgreSQL. Consultas diretas ao Neo4j para caminhos mais longos continuam como evolucao futura.
 
 ### Git MCP
 
-Estado atual:
-
-- Tools expostas.
-- Implementacao ainda limitada/placeholder.
-
-Pendencias:
-
-- Ler repositorios reais do workspace.
-- Executar consultas Git locais com seguranca.
-- Buscar commits por arquivo/simbolo.
-- Retornar diff, branch, PR/commit quando disponivel.
+Estado atual: sete tools consultam repositorios reais do workspace com protecao de `REPOS_ROOT`. Pull requests e demais recursos remotos ficam fora deste servidor e devem usar MCP GitHub dedicado.
 
 ### Open WebUI
 
@@ -383,10 +364,10 @@ Pendente/decisao futura:
 
 ## Lacunas Tecnicas Conhecidas
 
-1. Nao ha testes automatizados cobrindo indexacao.
-2. Knowledge MCP ainda nao consulta documentos reais da plataforma.
-3. Git MCP ainda nao usa repositorios reais.
-4. `code.explain_architecture` ainda nao gera visao arquitetural real.
+1. A indexacao completa ainda precisa de mais fixtures automatizadas por linguagem.
+2. A extracao de regras e deterministica; evoluir o corpus de avaliacao automatizada por linguagem e os sinais de corroboracao entre codigo, testes e grafo.
+3. O ranking precisa de benchmark com perguntas reais, Recall@k e MRR.
+4. Caminhos longos de impacto ainda nao consultam Neo4j diretamente.
 5. Nao ha explorador visual do grafo no Admin.
 6. Atualizacao Git incremental ainda nao existe.
 7. Nao ha controle de permissao por usuario/workspace alem da API key.
@@ -496,45 +477,11 @@ Arquivos provaveis:
 - `apps/git-mcp/src/index.js`
 - `docs/mcp-tools.md`
 
-### Fase 4 - Knowledge MCP Real (fora do fluxo documental atual)
+### Fase 4 - Fronteira documental (decisao concluida)
 
-Decisao: regras de negocio e documentos permanecem nas Knowledge Bases do Open
-WebUI. O Admin Panel e os MCPs permanecem focados no dominio tecnico. Esta fase so
-deve ser retomada se surgir um caso de uso explicito para documentos tecnicos
-gerenciados por workspace; ela nao deve ingerir ou espelhar as bases do Open WebUI.
+Documentos, regras documentais, permissoes, chunks, embeddings e citacoes pertencem exclusivamente ao Open WebUI. O Gateway, Code MCP e Git MCP nao ingerem, espelham nem consultam essas bases. O servico Knowledge MCP foi removido do runtime Compose e nenhuma tool documental e anunciada.
 
-Itens:
-
-- Se futuramente aprovado, implementar um pipeline proprio e independente para documentos tecnicos:
-- Implementar ingestion local para documentos:
-  - upload
-  - extracao de texto
-  - chunking
-  - embeddings
-  - persistencia em `documents` e `document_chunks`
-  - Qdrant collection `business_documents`
-- Implementar Knowledge MCP real:
-  - `knowledge.search_documents`
-  - `knowledge.list_documents`
-  - `knowledge.get_document`
-  - `knowledge.search_business_rules`
-  - `knowledge.search_embeddings`
-- Retornar citacoes com documento, chunk, pagina quando disponivel.
-
-Criterios de aceite:
-
-- Documento enviado para um workspace fica consultavel pelo Knowledge MCP.
-- Resultado retorna chunks citaveis e metadados suficientes.
-- Documento de outro workspace nao aparece.
-
-Arquivos provaveis:
-
-- `apps/knowledge-mcp/src/index.js`
-- `apps/admin/src/index.js`
-- `workers/document-ingestion/`
-- `workers/embedding-worker/`
-- `scripts/init-db.sql`
-- `docs/indexing.md`
+Tabelas ou codigo legado de prototipos anteriores podem ser removidos em uma migracao destrutiva futura, com backup e janela operacional; eles nao devem voltar ao fluxo ativo.
 
 ### Fase 5 - Open WebUI e Workspaces (decisao concluida)
 
@@ -747,13 +694,11 @@ Arquivos provaveis:
 
 ### MCP
 
-- Implementar Knowledge MCP real.
-- Ampliar o Git MCP local ja funcional com integracao opcional a provedores para pull requests.
+- Manter GitHub remoto em um MCP dedicado, sem duplicar credenciais ou tools no Gateway tecnico.
 - Evoluir `code.explain_architecture` e `code_analyze_impact`, hoje baseados nos dados reais do indice, com caminhos Neo4j mais longos.
-- Implementar `code.find_related_documents`.
-- Adicionar respostas padronizadas com `sources`.
-- Melhorar erros MCP com codigo, mensagem e acao recomendada.
-- Adicionar paginacao em tools que retornam muitos resultados.
+- Avaliar o ranking com corpus real e metricas Recall@k/MRR antes de adicionar cross-encoder local.
+- Adicionar paginacao/cursor as tools de grande volume.
+- Expandir revisao e feedback das regras de negocio extraidas.
 
 ### Admin UI
 
@@ -829,8 +774,8 @@ node --check apps/admin/src/index.js
 node --check apps/admin/public/app.js
 node --check apps/code-mcp/src/index.js
 node --check apps/gateway/src/index.js
-node --check apps/knowledge-mcp/src/index.js
 node --check apps/git-mcp/src/index.js
+./scripts/test-mcp.sh
 docker compose config --quiet
 bash -n install.sh scripts/create-qdrant-collections.sh scripts/check-health.sh scripts/backup.sh
 dotnet build workers/roslyn-indexer/RoslynIndexer.csproj
@@ -848,7 +793,5 @@ Observacao: `dotnet build` pode gerar `workers/roslyn-indexer/bin/` e `workers/r
 - `docs/operations.md`
 - `workers/roslyn-indexer/README.md`
 - `workers/tree-sitter-indexer/README.md`
-- `workers/document-ingestion/README.md`
-- `workers/embedding-worker/README.md`
 - `workers/graph-builder/README.md`
 - `workers/repository-sync/README.md`

@@ -177,35 +177,13 @@ services:
       - .env
     environment:
       PORT: 7000
-      KNOWLEDGE_MCP_URL: http://knowledge-mcp:7101
       CODE_MCP_URL: http://code-mcp:7102
       GIT_MCP_URL: http://git-mcp:7103
     ports:
       - "${MCP_GATEWAY_PORT}:7000"
     depends_on:
-      - knowledge-mcp
       - code-mcp
       - git-mcp
-    networks:
-      - ai-platform
-
-  knowledge-mcp:
-    build:
-      context: ./apps/knowledge-mcp
-      args:
-        NODE_IMAGE: ${NODE_IMAGE}
-    container_name: ai-knowledge-mcp
-    restart: unless-stopped
-    env_file:
-      - .env
-    environment:
-      PORT: 7101
-      SERVICE_NAME: knowledge-mcp
-    depends_on:
-      postgres:
-        condition: service_healthy
-      qdrant:
-        condition: service_started
     networks:
       - ai-platform
 
